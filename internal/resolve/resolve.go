@@ -84,54 +84,60 @@ type Options struct {
 	search func(name string) ([]string, error)
 }
 
-// Resolve turns name into a chosen cask name.
+// Resolve turns name into a chosen cask name, and returns the cask definition
+// when it already had to fetch one.
 //
 // It first attempts an exact match via lookupExact (brew.CaskInfo by default);
-// on a hit it returns name immediately without gathering candidates or invoking
-// the selector (R4). Otherwise it gathers candidates via search
-// (brew.SearchCandidates), filters them to cask-looking names, and either shows
-// the picker (TTY and not NoInput) or prints the candidates and returns
-// ErrNoInteractiveResolve. Zero candidates yields ErrNoCandidates. A user abort
-// in the picker yields ErrCancelled.
-func Resolve(name string, opts Options) (string, error) {
+// on a hit it returns name and the fetched *brew.Cask immediately without
+// gathering candidates or invoking the selector (R4) — callers on the common
+// exact-match path can reuse that cask instead of re-running brew info.
+// Otherwise it gathers candidates via search (brew.SearchCandidates), filters
+// them to cask-looking names, and either shows the picker (TTY and not NoInput)
+// or prints the candidates and returns ErrNoInteractiveResolve. On the picker
+// path the returned cask is nil (the chosen cask's definition was not fetched
+// here). Zero candidates yields ErrNoCandidates. A user abort in the picker
+// yields ErrCancelled.
+func Resolve(name string, opts Options) (string, *brew.Cask, error) {
 	opts = opts.withDefaults()
 
 	// Exact match first — proceed with no candidate gathering, no picker (R4).
 	cask, err := opts.lookupExact(name)
 	if err != nil && !errors.Is(err, brew.ErrCaskNotFound) {
-		return "", fmt.Errorf("looking up cask %q: %w", name, err)
+		return "", nil, fmt.Errorf("looking up cask %q: %w", name, err)
 	}
 	if err == nil && cask != nil {
-		return name, nil
+		return name, cask, nil
 	}
 
 	// No exact match — gather near-name candidates.
 	candidates, err := opts.search(name)
 	if err != nil {
-		return "", fmt.Errorf("searching for candidates for %q: %w", name, err)
+		return "", nil, fmt.Errorf("searching for candidates for %q: %w", name, err)
 	}
 	candidates = filterCaskCandidates(candidates, name)
 	if len(candidates) == 0 {
-		return "", fmt.Errorf("%w: %q", ErrNoCandidates, name)
+		return "", nil, fmt.Errorf("%w: %q", ErrNoCandidates, name)
 	}
 
 	// Non-interactive path: print candidates and refuse to prompt (R13/R14).
 	// This branch MUST NOT block — it never touches the selector.
 	if opts.NoInput || !opts.tty() {
 		printCandidates(opts.Stderr, name, candidates)
-		return "", fmt.Errorf("%w: %q", ErrNoInteractiveResolve, name)
+		return "", nil, fmt.Errorf("%w: %q", ErrNoInteractiveResolve, name)
 	}
 
-	// Interactive path: show the Clack-style picker.
+	// Interactive path: show the Clack-style picker. The chosen cask's
+	// definition is not fetched here, so the returned cask is nil and the
+	// caller fetches it.
 	prompt := fmt.Sprintf("No exact cask %q — did you mean:", name)
 	chosen, err := opts.Selector.Pick(prompt, candidates)
 	if err != nil {
 		if errors.Is(err, ErrCancelled) {
-			return "", ErrCancelled
+			return "", nil, ErrCancelled
 		}
-		return "", fmt.Errorf("selecting a cask: %w", err)
+		return "", nil, fmt.Errorf("selecting a cask: %w", err)
 	}
-	return chosen, nil
+	return chosen, nil, nil
 }
 
 // withDefaults returns a copy of opts with every unset field filled in with its

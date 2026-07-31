@@ -35,8 +35,8 @@ func fakeDeps(rec *recorder, cask *brew.Cask) (deps, *bytes.Buffer, *bytes.Buffe
 			return nil
 		},
 		isSlowHost: func(string) bool { return true },
-		resolve: func(name string, _ resolve.Options) (string, error) {
-			return name, nil
+		resolve: func(name string, _ resolve.Options) (string, *brew.Cask, error) {
+			return name, cask, nil
 		},
 		fetch: func(p accel.Params) error {
 			rec.fetchCalled = true
@@ -284,9 +284,10 @@ func TestHappyPath_Accelerates(t *testing.T) {
 	if rec.fetchParams.ExpectedSHA != "deadbeef" {
 		t.Fatalf("fetch should receive the cask sha, got %q", rec.fetchParams.ExpectedSHA)
 	}
-	// Cask reported installed → upgrade op.
-	if rec.handoffOp != brew.OpUpgrade {
-		t.Fatalf("expected upgrade op for an installed cask, got %q", rec.handoffOp)
+	// Every accelerated handoff uses reinstall-from-cache, which covers both
+	// first install and upgrade.
+	if rec.handoffOp != brew.OpReinstall {
+		t.Fatalf("expected reinstall op, got %q", rec.handoffOp)
 	}
 }
 
@@ -308,8 +309,8 @@ func TestNotInstalled_UsesReinstall(t *testing.T) {
 func TestResolveCancelled_CleanExit(t *testing.T) {
 	rec := &recorder{}
 	d, _, _ := fakeDeps(rec, sampleCask())
-	d.resolve = func(string, resolve.Options) (string, error) {
-		return "", resolve.ErrCancelled
+	d.resolve = func(string, resolve.Options) (string, *brew.Cask, error) {
+		return "", nil, resolve.ErrCancelled
 	}
 
 	err := runInstall(context.Background(), d, postureFlags{}, "orpheus")
@@ -325,8 +326,8 @@ func TestResolveCancelled_CleanExit(t *testing.T) {
 func TestResolveNoInteractive_NonZero(t *testing.T) {
 	rec := &recorder{}
 	d, _, _ := fakeDeps(rec, sampleCask())
-	d.resolve = func(string, resolve.Options) (string, error) {
-		return "", resolve.ErrNoInteractiveResolve
+	d.resolve = func(string, resolve.Options) (string, *brew.Cask, error) {
+		return "", nil, resolve.ErrNoInteractiveResolve
 	}
 
 	err := runInstall(context.Background(), d, postureFlags{noInput: true}, "orpheus")

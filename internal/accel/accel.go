@@ -186,11 +186,9 @@ func aria2Download(dir, name, rawurl string) error {
 	return nil
 }
 
-// removeIfPresent deletes path, ignoring a not-exist error. Other errors are
-// ignored too: cleanup of a sidecar/partial is best-effort and must never mask
-// the primary result (a verify outcome).
+// removeIfPresent deletes path, best-effort. Cleanup of a sidecar or partial
+// must never mask the primary result (a verify outcome), so every error —
+// including not-exist — is intentionally ignored.
 func removeIfPresent(path string) {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_ = err
-	}
+	_ = os.Remove(path)
 }

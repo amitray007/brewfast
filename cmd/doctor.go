@@ -65,7 +65,7 @@ func reportHealth(out io.Writer) {
 	fmt.Fprintln(out, "Health")
 	line(out, brew.IsInstalled("brew"), "brew present", "brew not found on PATH — install Homebrew")
 	line(out, brew.IsInstalled("aria2"), "aria2 present", "aria2 not found — brewfast installs it on first use")
-	line(out, stdinIsTTY(), "stdin is a TTY (interactive prompts available)", "stdin is not a TTY (running non-interactively)")
+	line(out, isTTY(os.Stdin), "stdin is a TTY (interactive prompts available)", "stdin is not a TTY (running non-interactively)")
 	line(out, tapReachable(), "tap reachable", "tap not reachable (network or brew unavailable) — best-effort check")
 }
 
@@ -302,15 +302,6 @@ func tapReachable() bool {
 		return false
 	}
 	return exec.Command("brew", "tap").Run() == nil
-}
-
-// stdinIsTTY reports whether standard input is a terminal.
-func stdinIsTTY() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // line prints a ✓/✗ health line given a boolean and the two message variants.

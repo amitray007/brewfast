@@ -27,7 +27,7 @@ type deps struct {
 	isInstalled  func(string) bool
 	installAria2 func() error
 	isSlowHost   func(string) bool
-	resolve      func(string, resolve.Options) (string, error)
+	resolve      func(string, resolve.Options) (string, *brew.Cask, error)
 	fetch        func(accel.Params) error
 	handoff      func(ctx context.Context, op brew.Operation, name string) error
 
@@ -112,8 +112,10 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 		ctx = context.Background()
 	}
 
-	// 1. Resolve the (possibly inexact) name.
-	resolved, err := d.resolve(name, resolve.Options{NoInput: flags.noInput})
+	// 1. Resolve the (possibly inexact) name. On the exact-match path resolve
+	// already fetched the cask definition and hands it back, so we skip a
+	// second brew info for the same cask.
+	resolved, cask, err := d.resolve(name, resolve.Options{NoInput: flags.noInput})
 	if err != nil {
 		switch {
 		case errors.Is(err, resolve.ErrCancelled):
@@ -130,13 +132,16 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 		}
 	}
 
-	// 2. Read the cask definition (url, sha256).
-	cask, err := d.caskInfo(resolved)
-	if err != nil {
-		if errors.Is(err, brew.ErrCaskNotFound) {
-			return stopf(1, "cask %q not found", resolved)
+	// 2. Read the cask definition (url, sha256) — only when resolve did not
+	// already supply it (the picker path returns a nil cask).
+	if cask == nil {
+		cask, err = d.caskInfo(resolved)
+		if err != nil {
+			if errors.Is(err, brew.ErrCaskNotFound) {
+				return stopf(1, "cask %q not found", resolved)
+			}
+			return stopf(1, "reading cask info for %q: %v", resolved, err)
 		}
-		return stopf(1, "reading cask info for %q: %v", resolved, err)
 	}
 
 	// 3. Host gate.
@@ -146,7 +151,7 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 		case flags.fallback:
 			// Non-slow host + --fallback: hand off to plain brew (F4 fallback).
 			fmt.Fprintf(d.stderr, "brewfast: %s is already CDN-fast; handing off to plain brew (--fallback).\n", resolved)
-			return d.handoff(ctx, chooseOp(d, resolved), resolved)
+			return d.handoff(ctx, handoffOp, resolved)
 		case flags.anyHost:
 			// --any-host override: accelerate anyway.
 			fmt.Fprintf(d.stderr, "brewfast: %s is not a recognized slow host; accelerating anyway (--any-host).\n", resolved)
@@ -195,7 +200,7 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 				// Proceed unverified: fall through to the no-verify warning + handoff.
 			case flags.fallback:
 				fmt.Fprintf(d.stderr, "brewfast: %s declares no checksum; handing off to plain brew (--fallback).\n", resolved)
-				return d.handoff(ctx, chooseOp(d, resolved), resolved)
+				return d.handoff(ctx, handoffOp, resolved)
 			default:
 				return stopf(1, "%s", firstImpressionNoChecksum(resolved))
 			}
@@ -224,7 +229,7 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 	os.Setenv("HOMEBREW_NO_AUTO_UPDATE", "1")
 
 	start := time.Now()
-	if err := d.handoff(ctx, chooseOp(d, resolved), resolved); err != nil {
+	if err := d.handoff(ctx, handoffOp, resolved); err != nil {
 		// Propagate brew's exit status verbatim (no extra wrapping message so the
 		// exit code maps cleanly).
 		return err
@@ -242,14 +247,12 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 	return nil
 }
 
-// chooseOp picks reinstall vs upgrade: an already-installed cask upgrades from
-// the freshly cached file, otherwise we reinstall-from-cache to install it.
-func chooseOp(d deps, name string) brew.Operation {
-	if d.isInstalled(name) {
-		return brew.OpUpgrade
-	}
-	return brew.OpReinstall
-}
+// handoffOp is the brew operation used for every accelerated handoff.
+// `brew reinstall --cask` installs the cask definition's current version from
+// the freshly cached file whether or not the cask is already present, so it
+// covers both first install and upgrade. (A cask token is never on $PATH, so a
+// LookPath-based installed check would be both wrong and wasted work here.)
+const handoffOp = brew.OpReinstall
 
 // firstImpressionHost is the R19 message for the already-fast-host default stop:
 // it frames the non-acceleration as expected, not a failure, and names the two
