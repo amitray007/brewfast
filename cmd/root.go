@@ -81,6 +81,8 @@ func newRootCmd() *cobra.Command {
 	// Match brew/CLI convention: `brewfast --version` prints just the version.
 	root.SetVersionTemplate("brewfast {{.Version}}\n")
 
+	root.AddCommand(newDoctorCmd())
+
 	return root
 }
 
