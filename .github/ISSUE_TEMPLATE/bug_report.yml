@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in brewfast doesn't work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. `brewfast doctor` output is very helpful for
+        install/cache problems — please paste it below if it's relevant.
+  - type: input
+    id: version
+    attributes:
+      label: brewfast version
+      description: Output of `brewfast --version`
+      placeholder: brewfast 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 15 arm64
+    validations:
+      required: true
+  - type: input
+    id: cask
+    attributes:
+      label: Cask involved
+      description: The cask you ran brewfast against, if any
+      placeholder: orpheus-nightly
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and output
+      description: The exact command you ran and what brewfast printed
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: brewfast doctor output
+      description: Optional, but very helpful for install/cache issues
+      render: shell

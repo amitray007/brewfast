@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/amitray007/brewfast/security/advisories/new
+    about: Report security issues privately, not as a public issue. See SECURITY.md.
+  - name: Question
+    url: https://github.com/amitray007/brewfast/discussions
+    about: Ask a usage question or start a discussion.
