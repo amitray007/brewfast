@@ -82,6 +82,8 @@ func newRootCmd() *cobra.Command {
 	root.SetVersionTemplate("brewfast {{.Version}}\n")
 
 	root.AddCommand(newDoctorCmd())
+	root.AddCommand(newUpgradeCmd())
+	root.AddCommand(newCheckCmd())
 
 	return root
 }
