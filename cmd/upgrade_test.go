@@ -17,10 +17,11 @@ func TestUpgrade_AlreadyCurrent(t *testing.T) {
 		runBrew: func(args ...string) (string, error) {
 			if len(args) > 0 && args[0] == "upgrade" {
 				upgradeArgs = args
-				// brew's already-current phrasing, plus a non-nil error is common
-				// (brew exits non-zero on "nothing to upgrade" in some versions);
-				// isAlreadyCurrent must win over the error.
-				return "Warning: brewfast 1.2.3 already installed", errors.New("exit status 1")
+				// brew succeeds (nil error) and reports brewfast already current.
+				// This is the genuine already-current case: a nil error gates the
+				// up-to-date report so a real failure is never masked (see
+				// TestUpgrade_AlreadyInstalledButFailed).
+				return "Warning: brewfast 1.2.3 already installed", nil
 			}
 			return "", nil
 		},
@@ -113,6 +114,34 @@ func TestUpgrade_RealFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "brew upgrade brewfast` failed") {
 		t.Fatalf("expected the failure error to name the brew command, got: %v", err)
+	}
+}
+
+// TestUpgrade_AlreadyInstalledButFailed: a real `brew upgrade` failure whose
+// output happens to contain an already-current marker ("already installed") must
+// surface as a failure, not be masked as up-to-date with a clean exit (Fix 3).
+func TestUpgrade_AlreadyInstalledButFailed(t *testing.T) {
+	var out bytes.Buffer
+	d := upgradeDeps{
+		isInstalled: func(string) bool { return true },
+		runBrew: func(args ...string) (string, error) {
+			if len(args) > 0 && args[0] == "upgrade" {
+				// Output contains an already-current marker, but brew failed.
+				return "Error: brewfast 1.2.3 already installed but the keg is broken", errors.New("exit status 1")
+			}
+			return "", nil
+		},
+	}
+
+	err := runUpgrade(&out, d)
+	if err == nil {
+		t.Fatal("a failed upgrade must surface as an error even when its output contains an already-current marker")
+	}
+	if !strings.Contains(err.Error(), "brew upgrade brewfast` failed") {
+		t.Fatalf("expected the failure error to name the brew command, got: %v", err)
+	}
+	if strings.Contains(out.String(), "up-to-date") {
+		t.Fatalf("a real failure must not be reported as up-to-date, got: %q", out.String())
 	}
 }
 

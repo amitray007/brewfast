@@ -5,7 +5,20 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
+
+// fixedNow is a deterministic reference time used to drive the staleness gate in
+// findStuckCasks tests without ever calling time.Now().
+var fixedNow = time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+
+// chtimes is a test helper that stamps a fixed mtime on a path, failing on error.
+func chtimes(t *testing.T, path string, mtime time.Time) {
+	t.Helper()
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("chtimes %s: %v", path, err)
+	}
+}
 
 // mkdirAll is a test helper that fails the test on error.
 func mkdirAll(t *testing.T, path string) {
@@ -25,19 +38,44 @@ func writeFile(t *testing.T, path, content string) {
 }
 
 // TestFindStuckCasks_Detected builds a stuck fixture: a token with a version
-// directory but NO receipt at token/.metadata and no staged artifact → flagged.
+// directory but NO receipt at token/.metadata and no staged artifact, whose
+// version dir is STALE (mtime well before now) → flagged. The staleness is what
+// distinguishes a wedged transaction from a live in-progress install.
 func TestFindStuckCasks_Detected(t *testing.T) {
 	root := t.TempDir()
 	// <root>/orpheus-nightly/0.5.9/ exists, empty (no artifact).
-	mkdirAll(t, filepath.Join(root, "orpheus-nightly", "0.5.9"))
+	versionDir := filepath.Join(root, "orpheus-nightly", "0.5.9")
+	mkdirAll(t, versionDir)
 	// No <token>/.metadata/INSTALL_RECEIPT.json.
+	// Stamp the version dir well before now so it reads as stale, not in-flight.
+	chtimes(t, versionDir, fixedNow.Add(-time.Hour))
 
-	stuck, err := findStuckCasks(root)
+	stuck, err := findStuckCasks(root, fixedNow)
 	if err != nil {
 		t.Fatalf("findStuckCasks: %v", err)
 	}
 	if !reflect.DeepEqual(stuck, []string{"orpheus-nightly"}) {
 		t.Fatalf("want [orpheus-nightly], got %v", stuck)
+	}
+}
+
+// TestFindStuckCasks_LiveInstallNotFlagged verifies the staleness gate: a token
+// matching the raw stuck signature (version dir present, no receipt, no artifact)
+// but with a RECENTLY-modified version dir is treated as a live in-progress
+// install and is NOT flagged — the false-positive the gate exists to prevent.
+func TestFindStuckCasks_LiveInstallNotFlagged(t *testing.T) {
+	root := t.TempDir()
+	versionDir := filepath.Join(root, "orpheus-nightly", "0.5.9")
+	mkdirAll(t, versionDir)
+	// Version dir touched just now (within stuckThreshold): an install in progress.
+	chtimes(t, versionDir, fixedNow.Add(-time.Minute))
+
+	stuck, err := findStuckCasks(root, fixedNow)
+	if err != nil {
+		t.Fatalf("findStuckCasks: %v", err)
+	}
+	if len(stuck) != 0 {
+		t.Fatalf("live in-progress install should not be flagged, got %v", stuck)
 	}
 }
 
@@ -51,7 +89,7 @@ func TestFindStuckCasks_Healthy(t *testing.T) {
 	// Receipt present at <token>/.metadata/INSTALL_RECEIPT.json → completed install.
 	writeFile(t, filepath.Join(root, "orpheus", ".metadata", "INSTALL_RECEIPT.json"), "{}")
 
-	stuck, err := findStuckCasks(root)
+	stuck, err := findStuckCasks(root, fixedNow)
 	if err != nil {
 		t.Fatalf("findStuckCasks: %v", err)
 	}
@@ -67,7 +105,7 @@ func TestFindStuckCasks_ArtifactPresent(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "widget", "1.0", "Widget.app.txt"), "payload")
 
-	stuck, err := findStuckCasks(root)
+	stuck, err := findStuckCasks(root, fixedNow)
 	if err != nil {
 		t.Fatalf("findStuckCasks: %v", err)
 	}
@@ -82,7 +120,7 @@ func TestFindStuckCasks_NoVersionDir(t *testing.T) {
 	root := t.TempDir()
 	mkdirAll(t, filepath.Join(root, "lonely", ".metadata"))
 
-	stuck, err := findStuckCasks(root)
+	stuck, err := findStuckCasks(root, fixedNow)
 	if err != nil {
 		t.Fatalf("findStuckCasks: %v", err)
 	}
@@ -94,7 +132,7 @@ func TestFindStuckCasks_NoVersionDir(t *testing.T) {
 // TestFindStuckCasks_MissingRoot returns no error and no casks when the Caskroom
 // does not exist (nothing installed).
 func TestFindStuckCasks_MissingRoot(t *testing.T) {
-	stuck, err := findStuckCasks(filepath.Join(t.TempDir(), "does-not-exist"))
+	stuck, err := findStuckCasks(filepath.Join(t.TempDir(), "does-not-exist"), fixedNow)
 	if err != nil {
 		t.Fatalf("missing root should not error: %v", err)
 	}

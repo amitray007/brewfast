@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/amitray007/brewfast/internal/brew"
 	"github.com/spf13/cobra"
@@ -18,6 +19,15 @@ import (
 // hash followed by "--". Files carrying this prefix are brew's own canonical
 // cache entries and must never be swept as orphans (R25).
 var hashPrefixRe = regexp.MustCompile(`^[0-9a-f]{64}--`)
+
+// stuckThreshold is the minimum age of a staged version directory before doctor
+// will classify a receipt-less, artifact-less cask as *stuck* rather than an
+// install in progress. During a normal install brew stages the version dir and
+// only later writes the receipt / copies the app, so all three "stuck" signals
+// are transiently true. Requiring the version dir to be older than this gate
+// keeps doctor from false-positiving (and offering a destructive recovery for)
+// a healthy in-flight install.
+const stuckThreshold = 10 * time.Minute
 
 // newDoctorCmd builds the `brewfast doctor` subcommand: a read-only diagnostics
 // pass that reports environment health, detects stuck cask transactions (R24),
@@ -54,7 +64,7 @@ func runDoctor(out io.Writer) error {
 		return nil
 	}
 
-	reportStuck(out, filepath.Join(prefix, "Caskroom"))
+	reportStuck(out, filepath.Join(prefix, "Caskroom"), time.Now())
 	reportOrphans(out, filepath.Join(brewCache(), "downloads"))
 	return nil
 }
@@ -69,10 +79,12 @@ func reportHealth(out io.Writer) {
 	line(out, tapReachable(), "tap reachable", "tap not reachable (network or brew unavailable) — best-effort check")
 }
 
-// reportStuck runs the R24 detection and offers the mechanical recovery.
-func reportStuck(out io.Writer, caskroomDir string) {
+// reportStuck runs the R24 detection and offers the mechanical recovery. now is
+// injected (the caller passes time.Now()) so the staleness gate is deterministic
+// under test.
+func reportStuck(out io.Writer, caskroomDir string, now time.Time) {
 	fmt.Fprintln(out, "\nStuck transactions")
-	stuck, err := findStuckCasks(caskroomDir)
+	stuck, err := findStuckCasks(caskroomDir, now)
 	if err != nil {
 		fmt.Fprintf(out, "  ✗ could not scan %s: %v\n", caskroomDir, err)
 		return
@@ -86,6 +98,11 @@ func reportStuck(out io.Writer, caskroomDir string) {
 		fmt.Fprintf(out, "      • %s\n", tok)
 	}
 	fmt.Fprintln(out, "  Recommended recovery (review, then run yourself — brewfast will NOT do this for you):")
+	fmt.Fprintln(out, "  First try the non-destructive reinstall (reinstalls from cache, keeps nothing to lose):")
+	for _, tok := range stuck {
+		fmt.Fprintf(out, "      brew reinstall --cask %s\n", tok)
+	}
+	fmt.Fprintln(out, "  Only if that does NOT clear it, remove the wedged version directory and force a reinstall:")
 	for _, tok := range stuck {
 		fmt.Fprintf(out, "      rm -rf %q && brew reinstall --force --cask %s\n",
 			filepath.Join(caskroomDir, tok), tok)
@@ -118,11 +135,16 @@ func reportOrphans(out io.Writer, downloadsDir string) {
 // findStuckCasks walks a Caskroom root and returns the tokens whose transaction
 // is stuck per R24: a `<token>/<version>/` version directory exists AND
 // `<token>/.metadata/INSTALL_RECEIPT.json` is ABSENT AND the installed artifact
-// is missing/empty. The receipt lives at the TOKEN level under `.metadata/`, not
-// inside the version dir — checking the wrong location would flag every healthy
-// cask. This is a pure function over the passed-in root so it can be tested with
-// a temp fixture and no real brew.
-func findStuckCasks(caskroomDir string) ([]string, error) {
+// is missing/empty AND the version directory has not been modified within
+// stuckThreshold of now. The receipt lives at the TOKEN level under `.metadata/`,
+// not inside the version dir — checking the wrong location would flag every
+// healthy cask. The staleness gate matters because those first three signals are
+// ALSO transiently true during a normal in-progress install (brew stages the
+// version dir before writing the receipt / copying the app); a recently-touched
+// version dir is presumed live, not wedged. now is injected so the gate is
+// deterministic under test. This is a pure function over the passed-in root so it
+// can be tested with a temp fixture and no real brew.
+func findStuckCasks(caskroomDir string, now time.Time) ([]string, error) {
 	entries, err := os.ReadDir(caskroomDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -153,9 +175,11 @@ func findStuckCasks(caskroomDir string) ([]string, error) {
 			continue
 		}
 
-		// Version dir present, no receipt, and the staged artifact is missing/empty:
-		// the transaction wedged mid-install.
-		if artifactMissingOrEmpty(versionDir) {
+		// Version dir present, no receipt, and the staged artifact is missing/empty.
+		// But this is also exactly what a normal in-progress install looks like, so
+		// only classify as stuck once the version dir has gone stale: a recently
+		// modified dir is presumed to be a live install, not a wedged one.
+		if artifactMissingOrEmpty(versionDir) && versionDirStale(versionDir, now) {
 			stuck = append(stuck, token)
 		}
 	}
@@ -178,6 +202,18 @@ func hasVersionDir(tokenDir string) string {
 		return filepath.Join(tokenDir, e.Name())
 	}
 	return ""
+}
+
+// versionDirStale reports whether versionDir was last modified more than
+// stuckThreshold before now. A dir we cannot stat is treated as stale (its
+// mtime is unknowable, and the artifact-empty signal already fired). A
+// recently-modified dir is presumed to be an install in progress, not wedged.
+func versionDirStale(versionDir string, now time.Time) bool {
+	info, err := os.Stat(versionDir)
+	if err != nil {
+		return true
+	}
+	return now.Sub(info.ModTime()) > stuckThreshold
 }
 
 // artifactMissingOrEmpty reports whether a version directory has no non-empty

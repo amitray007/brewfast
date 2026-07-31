@@ -17,8 +17,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// sha256HexRE matches exactly 64 hex digits — the shape of a lower/upper-hex
+// SHA-256 digest. An ExpectedSHA that is non-empty but does not match this can
+// never equal a real digest, so it is treated as "no usable checksum" rather
+// than an unconditional mismatch.
+var sha256HexRE = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
+// isValidSHA reports whether s (after trimming) is a well-formed 64-hex
+// SHA-256 digest. Empty or malformed values are not valid — there is nothing
+// to verify against.
+func isValidSHA(s string) bool {
+	return sha256HexRE.MatchString(strings.TrimSpace(s))
+}
 
 // ErrChecksumMismatch is a FATAL sentinel: the downloaded file's SHA-256 did
 // not match the cask's declared value. The file and its .aria2 sidecar have
@@ -94,6 +108,21 @@ func (d Downloader) Fetch(p Params) error {
 		return fmt.Errorf("cache path %q has no filename component", p.CachePath)
 	}
 
+	filePath := filepath.Join(dir, name)
+	sidecar := filePath + ".aria2"
+
+	// When there is no verifiable checksum (empty or malformed ExpectedSHA),
+	// verify cannot catch a stale or planted file. aria2's -c would happily
+	// reuse a pre-existing full-size file at the canonical path (or splice onto
+	// a stale partial) and we would install those unverified bytes. Remove any
+	// pre-existing canonical file AND its .aria2 sidecar first so aria2 does a
+	// clean full download. When a checksum IS present, keep -c resume behavior:
+	// verifyChecksum catches any bad splice.
+	if !isValidSHA(p.ExpectedSHA) {
+		removeIfPresent(filePath)
+		removeIfPresent(sidecar)
+	}
+
 	transfer := d.Download
 	if transfer == nil {
 		transfer = aria2Download
@@ -101,9 +130,6 @@ func (d Downloader) Fetch(p Params) error {
 	if err := transfer(dir, name, p.URL); err != nil {
 		return fmt.Errorf("aria2 download of %q: %w", p.URL, err)
 	}
-
-	filePath := filepath.Join(dir, name)
-	sidecar := filePath + ".aria2"
 
 	// A completed transfer should not leave a control sidecar; remove it if
 	// aria2 left one behind (e.g. a resumed/interrupted run).
@@ -137,14 +163,24 @@ func requireHTTPS(rawurl string) error {
 // verifyChecksum streams the file at path through SHA-256 and compares it to
 // expectedSHA (lower-hex, case-insensitive). It returns:
 //
-//   - ErrNoChecksum if expectedSHA is empty (nothing to verify against),
-//   - ErrChecksumMismatch if the computed digest differs,
+//   - ErrNoChecksum if expectedSHA is empty OR malformed (not 64-hex): in
+//     either case there is nothing verifiable to compare against, so the
+//     posture is the caller's to decide rather than an unconditional (and
+//     unrecoverable) mismatch,
+//   - ErrChecksumMismatch if a well-formed digest differs,
 //   - nil on a match.
 //
 // It is pure w.r.t. package state — a separately testable function over a real
 // file — so the verify decision can be covered without any download.
 func verifyChecksum(path, expectedSHA string) error {
 	if strings.TrimSpace(expectedSHA) == "" {
+		return ErrNoChecksum
+	}
+	// A non-empty but malformed expected value (not 64-hex) can never equal a
+	// real digest — comparing would yield an unconditional, unrecoverable
+	// ErrChecksumMismatch and a genuine cask could never install. Surface it as
+	// unverifiable instead and let the caller's --no-verify posture decide.
+	if !isValidSHA(expectedSHA) {
 		return ErrNoChecksum
 	}
 
@@ -173,6 +209,11 @@ func aria2Download(dir, name, rawurl string) error {
 	cmd := exec.Command(
 		"aria2c",
 		"--check-certificate=true",
+		// Stall guard: abort a connection that makes no meaningful progress
+		// (slow-loris server) rather than hanging brewfast forever under CI or
+		// unattended use.
+		"--lowest-speed-limit=1K",
+		"--timeout=60",
 		"-x16", "-s16", "-k1M", "-c",
 		"-o", name,
 		"-d", dir,

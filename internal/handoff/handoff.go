@@ -152,17 +152,27 @@ func (h *Handoff) Run(ctx context.Context, op brew.Operation, name string) error
 	args := brew.HandoffArgs(op, name)
 
 	cmd := h.cmdFactory()("brew", args...)
+
+	// Install the signal handler BEFORE starting the child. If Notify ran after
+	// Start, a SIGINT/SIGTERM/SIGHUP delivered in that window would hit
+	// brewfast's DEFAULT disposition: brewfast would die without a notice, and
+	// because the child runs in its own process group (Setpgid), it would be
+	// orphaned and keep installing unsupervised — the exact incident this package
+	// exists to prevent. Trapping first guarantees no trapped signal ever has a
+	// window under the default disposition.
+	//
+	// Buffered so a signal arriving between Notify and our select — including one
+	// that lands during Start, before supervise begins — is not lost.
+	sigCh := make(chan os.Signal, 4)
+	h.notifyFunc()(sigCh, trappedSignals...)
+	defer h.stopFunc()(sigCh)
+
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting brew handoff: %w", err)
 	}
 	if h.afterStart != nil {
 		h.afterStart(cmd)
 	}
-
-	// Buffered so a signal arriving between Notify and our select is not lost.
-	sigCh := make(chan os.Signal, 4)
-	h.notifyFunc()(sigCh, trappedSignals...)
-	defer h.stopFunc()(sigCh)
 
 	waitErr := supervise(cmd.Wait, sigCh, h.writer())
 	return waitErr

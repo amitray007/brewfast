@@ -68,7 +68,11 @@ func runUpgrade(out io.Writer, d upgradeDeps) error {
 	}
 
 	upgradeOut, err := d.runBrew("upgrade", "brewfast")
-	if isAlreadyCurrent(upgradeOut) {
+	// Only treat the output as "already current" when the upgrade actually
+	// succeeded. A real failure whose output happens to contain an already-current
+	// marker (e.g. "already installed") must surface as a failure, not be masked as
+	// up-to-date with exit 0.
+	if err == nil && isAlreadyCurrent(upgradeOut) {
 		fmt.Fprintln(out, "brewfast: already up-to-date; nothing to upgrade.")
 		return nil
 	}

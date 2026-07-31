@@ -24,7 +24,15 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 )
+
+// brewCmdTimeout bounds every network-touching brew invocation (info/search/
+// cache resolution). `brew info --json=v2` and `brew search` refresh taps and
+// thus touch the network; without a ceiling a hung upstream would block the
+// whole install pipeline forever. 30s is generous for a healthy tap refresh yet
+// fails fast when brew is wedged.
+const brewCmdTimeout = 30 * time.Second
 
 // ErrCaskNotFound is returned when a queried cask does not exist. Callers can
 // test for it with errors.Is.
@@ -224,9 +232,14 @@ func CaskInfo(name string) (*Cask, error) {
 	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
-	cmd := exec.Command("brew", "info", "--json=v2", "--cask", "--", name)
+	ctx, cancel := context.WithTimeout(context.Background(), brewCmdTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "brew", "info", "--json=v2", "--cask", "--", name)
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("brew info for %q timed out after %s", name, brewCmdTimeout)
+		}
 		// brew exits non-zero for an unknown cask; disambiguate from a real
 		// failure by trying to parse whatever it emitted. An unknown cask
 		// prints no valid casks document, so parseCaskInfo returns
@@ -248,9 +261,14 @@ func CachePath(name string) (string, error) {
 	if err := ValidateName(name); err != nil {
 		return "", err
 	}
-	cmd := exec.Command("brew", "--cache", "--cask", "--", name)
+	ctx, cancel := context.WithTimeout(context.Background(), brewCmdTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "brew", "--cache", "--cask", "--", name)
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("brew --cache for %q timed out after %s", name, brewCmdTimeout)
+		}
 		return "", fmt.Errorf("resolving cache path for %q: %w", name, err)
 	}
 	path := strings.TrimSpace(string(out))
@@ -269,9 +287,14 @@ func SearchCandidates(name string) ([]string, error) {
 	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
-	cmd := exec.Command("brew", "search", "--", name)
+	ctx, cancel := context.WithTimeout(context.Background(), brewCmdTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "brew", "search", "--", name)
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("brew search for %q timed out after %s", name, brewCmdTimeout)
+		}
 		// A no-match still exits 0, so a non-zero exit is a real failure — but
 		// parse whatever stdout we got first: if brew printed candidates before
 		// a nonzero exit, honor them.

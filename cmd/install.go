@@ -112,6 +112,13 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 		ctx = context.Background()
 	}
 
+	// --force is the "attempt the fast path even where the default would refuse"
+	// posture: it implies both --any-host (accelerate an already-fast host) and
+	// --no-verify (tolerate a *missing* checksum) for the refuse-by-default gates
+	// below. It does NOT rescue a genuine checksum MISMATCH — that stays fatal.
+	anyHost := flags.anyHost || flags.force
+	noVerify := flags.noVerify || flags.force
+
 	// 1. Resolve the (possibly inexact) name. On the exact-match path resolve
 	// already fetched the cask definition and hands it back, so we skip a
 	// second brew info for the same cask.
@@ -152,8 +159,8 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 			// Non-slow host + --fallback: hand off to plain brew (F4 fallback).
 			fmt.Fprintf(d.stderr, "brewfast: %s is already CDN-fast; handing off to plain brew (--fallback).\n", resolved)
 			return d.handoff(ctx, handoffOp, resolved)
-		case flags.anyHost:
-			// --any-host override: accelerate anyway.
+		case anyHost:
+			// --any-host (or --force) override: accelerate anyway.
 			fmt.Fprintf(d.stderr, "brewfast: %s is not a recognized slow host; accelerating anyway (--any-host).\n", resolved)
 		default:
 			// Default stop with the R19 first-impression framing.
@@ -196,7 +203,7 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 			return stopf(1, "brewfast: refusing to download %s over a non-https URL (%s)", resolved, cask.URL)
 		case errors.Is(fetchErr, accel.ErrNoChecksum):
 			switch {
-			case flags.noVerify:
+			case noVerify:
 				// Proceed unverified: fall through to the no-verify warning + handoff.
 			case flags.fallback:
 				fmt.Fprintf(d.stderr, "brewfast: %s declares no checksum; handing off to plain brew (--fallback).\n", resolved)
@@ -209,9 +216,11 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 		}
 	}
 
-	// 6. No-verify in effect (either explicitly requested, or the cask had no
-	// checksum and --no-verify tolerated it). Emit an unmissable warning.
-	unverified := flags.noVerify && (fetchErr == nil || errors.Is(fetchErr, accel.ErrNoChecksum))
+	// 6. Verification genuinely did not happen only on the no-checksum path that
+	// --no-verify/--force tolerated. A successful checksum match (fetchErr == nil)
+	// means the bytes WERE verified, so it is never "unverified" — regardless of
+	// the flag. Emit the unmissable warning only for the real no-checksum case.
+	unverified := errors.Is(fetchErr, accel.ErrNoChecksum)
 	if unverified {
 		fmt.Fprintf(d.stderr,
 			"\n!! WARNING: installing %s WITHOUT checksum verification (--no-verify).\n"+

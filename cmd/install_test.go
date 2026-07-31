@@ -305,6 +305,94 @@ func TestNotInstalled_UsesReinstall(t *testing.T) {
 	}
 }
 
+// Fix 1: --force on a non-slow host → accelerates (implies --any-host).
+func TestForce_NonSlowHost_Accelerates(t *testing.T) {
+	rec := &recorder{}
+	d, _, _ := fakeDeps(rec, sampleCask())
+	d.isSlowHost = func(string) bool { return false }
+
+	err := runInstall(context.Background(), d, postureFlags{force: true}, "orpheus-nightly")
+	if err != nil {
+		t.Fatalf("--force should accelerate on a non-slow host, got: %v", err)
+	}
+	if !rec.fetchCalled {
+		t.Fatal("expected fetch to be called on the --force override path")
+	}
+	if !rec.handoffCalled {
+		t.Fatal("expected handoff after a successful accelerated fetch under --force")
+	}
+}
+
+// Fix 1: --force on a no-checksum cask → proceeds (implies --no-verify).
+func TestForce_NoChecksum_Proceeds(t *testing.T) {
+	rec := &recorder{}
+	d, _, errBuf := fakeDeps(rec, sampleCask())
+	d.fetch = func(p accel.Params) error {
+		rec.fetchCalled = true
+		return accel.ErrNoChecksum
+	}
+
+	err := runInstall(context.Background(), d, postureFlags{force: true}, "orpheus-nightly")
+	if err != nil {
+		t.Fatalf("--force should tolerate a missing checksum and proceed, got: %v", err)
+	}
+	if !rec.handoffCalled {
+		t.Fatal("expected handoff to proceed under --force on a no-checksum cask")
+	}
+	// A missing checksum genuinely was not verified, so the warning IS expected.
+	if !strings.Contains(errBuf.String(), "WARNING") {
+		t.Fatalf("expected the unverified warning on the no-checksum --force path, got: %q", errBuf.String())
+	}
+}
+
+// Fix 1: --force must NOT rescue a genuine checksum mismatch — still fatal.
+func TestForce_ChecksumMismatch_StillFatal(t *testing.T) {
+	rec := &recorder{}
+	d, _, _ := fakeDeps(rec, sampleCask())
+	d.fetch = func(p accel.Params) error {
+		rec.fetchCalled = true
+		return accel.ErrChecksumMismatch
+	}
+
+	err := runInstall(context.Background(), d, postureFlags{force: true}, "orpheus-nightly")
+	if err == nil {
+		t.Fatal("checksum mismatch must be fatal even under --force, got nil")
+	}
+	if !errors.Is(err, accel.ErrChecksumMismatch) {
+		t.Fatalf("expected the error to wrap ErrChecksumMismatch, got: %v", err)
+	}
+	if exitCodeFor(err) == 0 {
+		t.Fatalf("checksum mismatch must be non-zero exit under --force")
+	}
+	if rec.handoffCalled {
+		t.Fatal("no handoff should ever happen after a checksum mismatch")
+	}
+}
+
+// Fix 2: --no-verify on a cask WITH a matching checksum (fetch returns nil) →
+// bytes WERE verified, so no unverified warning and no "(installed unverified)"
+// note. The success line is suppressed here (buffer stdout is non-TTY), so we
+// assert the warning's absence on stderr and that the note never appears.
+func TestNoVerify_ChecksumMatched_NotUnverified(t *testing.T) {
+	rec := &recorder{}
+	d, out, errBuf := fakeDeps(rec, sampleCask())
+	// Default fetch returns nil → checksum matched.
+
+	err := runInstall(context.Background(), d, postureFlags{noVerify: true}, "orpheus-nightly")
+	if err != nil {
+		t.Fatalf("--no-verify with a matching checksum should succeed, got: %v", err)
+	}
+	if !rec.handoffCalled {
+		t.Fatal("expected handoff on a successful verified install")
+	}
+	if strings.Contains(errBuf.String(), "WARNING") || strings.Contains(errBuf.String(), "NOT checked") {
+		t.Fatalf("bytes WERE verified; no unverified warning must be printed, got: %q", errBuf.String())
+	}
+	if strings.Contains(out.String(), "installed unverified") {
+		t.Fatalf("success note must not claim unverified when the checksum matched, got: %q", out.String())
+	}
+}
+
 // Resolve cancel → clean (zero) exit, nothing fetched.
 func TestResolveCancelled_CleanExit(t *testing.T) {
 	rec := &recorder{}

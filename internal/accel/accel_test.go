@@ -63,6 +63,79 @@ func TestVerifyChecksum_Empty(t *testing.T) {
 	}
 }
 
+// TestVerifyChecksum_Malformed covers Fix 1: a non-empty but malformed
+// expected value (not 64-hex) can never equal a real digest. It must surface
+// as ErrNoChecksum (unverifiable, posture is the caller's) rather than a
+// permanent, unrecoverable ErrChecksumMismatch that would block a genuine cask.
+func TestVerifyChecksum_Malformed(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "asset.dmg", []byte("bytes"))
+
+	malformed := []string{
+		"abc123",                         // far too short
+		"not-hex-at-all",                 // non-hex characters
+		sha256Hex([]byte("x"))[:63],      // 63 hex digits — one short
+		sha256Hex([]byte("x")) + "0",     // 65 hex digits — one long
+		"g" + sha256Hex([]byte("x"))[1:], // 64 chars but a non-hex digit
+	}
+	for _, exp := range malformed {
+		err := verifyChecksum(p, exp)
+		if !errors.Is(err, ErrNoChecksum) {
+			t.Errorf("verifyChecksum(malformed %q) = %v, want ErrNoChecksum", exp, err)
+		}
+		if errors.Is(err, ErrChecksumMismatch) {
+			t.Errorf("verifyChecksum(malformed %q) returned ErrChecksumMismatch; malformed must not be a fatal mismatch", exp)
+		}
+	}
+}
+
+// TestFetch_NoChecksumRemovesStaleFile covers Fix 2: when ExpectedSHA is empty
+// (or malformed) there is no verify to catch a stale/planted file at the
+// canonical path. Fetch must remove any pre-existing canonical file and its
+// .aria2 sidecar BEFORE the transfer so aria2 -c cannot reuse unverifiable
+// bytes. The fake download records whether the canonical file still existed at
+// the moment it was invoked.
+func TestFetch_NoChecksumRemovesStaleFile(t *testing.T) {
+	dir := t.TempDir()
+	name := "stale--4.0.dmg"
+	cachePath := filepath.Join(dir, name)
+
+	// Seed a pre-existing full-size "stale/planted" file and a leftover sidecar
+	// at the canonical path before the transfer runs.
+	writeFile(t, dir, name, []byte("stale planted bytes"))
+	writeFile(t, dir, name+".aria2", []byte("stale control"))
+
+	existedAtCall := true
+	sidecarAtCall := true
+	d := Downloader{
+		Download: func(gotDir, gotName, _ string) error {
+			if _, statErr := os.Stat(filepath.Join(gotDir, gotName)); errors.Is(statErr, os.ErrNotExist) {
+				existedAtCall = false
+			}
+			if _, statErr := os.Stat(filepath.Join(gotDir, gotName+".aria2")); errors.Is(statErr, os.ErrNotExist) {
+				sidecarAtCall = false
+			}
+			writeFile(t, gotDir, gotName, []byte("freshly fetched bytes"))
+			return nil
+		},
+	}
+
+	err := d.Fetch(Params{
+		URL:         "https://dl.example.com/app.dmg",
+		CachePath:   cachePath,
+		ExpectedSHA: "",
+	})
+	if !errors.Is(err, ErrNoChecksum) {
+		t.Fatalf("Fetch(no checksum) = %v, want ErrNoChecksum", err)
+	}
+	if existedAtCall {
+		t.Error("stale canonical file still existed when transfer was invoked; want removed before transfer")
+	}
+	if sidecarAtCall {
+		t.Error("stale .aria2 sidecar still existed when transfer was invoked; want removed before transfer")
+	}
+}
+
 func TestRequireHTTPS(t *testing.T) {
 	good := []string{
 		"https://github.com/o/r/releases/download/v1/app.dmg",

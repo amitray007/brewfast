@@ -239,6 +239,69 @@ func TestRun_PIDSignalToBrewfastSwallowed(t *testing.T) {
 	}
 }
 
+// TestRun_NotifyInstalledBeforeChildStarts is the regression test for the P1
+// ordering defect: cmd.Start() must NOT run before the signal handler is
+// installed. If Start ran first, a trapped signal delivered in that window would
+// hit brewfast's default disposition — brewfast dies with no notice and, because
+// the child runs in its own process group (Setpgid), the child is orphaned and
+// keeps installing unsupervised.
+//
+// Delivering a signal precisely inside that window is not deterministically
+// timeable, so the invariant is asserted structurally: using the notify and
+// afterStart seams, record the order of events and assert Notify happened before
+// the child was observably started. The buffered channel already makes moving
+// Notify earlier safe (a signal between Notify and the select is retained), so
+// ordering is both necessary and sufficient for the guarantee.
+func TestRun_NotifyInstalledBeforeChildStarts(t *testing.T) {
+	requireUnix(t)
+
+	var (
+		mu           sync.Mutex
+		order        []string
+		notifyCalled bool
+	)
+	record := func(event string) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, event)
+	}
+
+	started := make(chan struct{}, 1)
+	h := &Handoff{
+		newCmd: helperCmdFactory(helperOpts{sleepMS: 30, exitCode: 0}, started),
+		notify: func(ch chan<- os.Signal, sig ...os.Signal) {
+			mu.Lock()
+			notifyCalled = true
+			mu.Unlock()
+			record("notify")
+			// Delegate to the real handler so the installed trap is genuine —
+			// this is the true production seam, not a no-op.
+			signal.Notify(ch, sig...)
+		},
+		stop: func(ch chan<- os.Signal) { signal.Stop(ch) },
+		out:  &bytes.Buffer{},
+		afterStart: func(cmd *exec.Cmd) {
+			mu.Lock()
+			seen := notifyCalled
+			mu.Unlock()
+			if !seen {
+				t.Errorf("child started before signal handler was installed: a trapped signal in this window would orphan the child")
+			}
+			record("start")
+		},
+	}
+
+	if err := h.Run(context.Background(), brew.OpReinstall, "orpheus-nightly"); err != nil {
+		t.Fatalf("clean run returned error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) != 2 || order[0] != "notify" || order[1] != "start" {
+		t.Fatalf("expected notify to precede child start; got order %v", order)
+	}
+}
+
 // TestRun_CleanExitPropagatesStatus proves a clean handoff (no signal) forwards
 // the child's exit status: success stays success, and a non-zero child exit is
 // returned as an *exec.ExitError with the code preserved.
