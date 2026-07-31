@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Go module dependencies (cobra, huh, x/term, ...)
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+
+  # GitHub Actions used in the CI and release workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

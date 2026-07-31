@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest an improvement to brewfast
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        brewfast is intentionally small and focused (accelerate slow GitHub-asset
+        cask downloads). Please check `CONTRIBUTING.md` for what's in and out of
+        scope before proposing something large.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The situation you hit, not the solution you have in mind
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered

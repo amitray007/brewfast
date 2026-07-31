@@ -1,5 +1,9 @@
 # brewfast
 
+[![CI](https://github.com/amitray007/brewfast/actions/workflows/ci.yml/badge.svg)](https://github.com/amitray007/brewfast/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/amitray007/brewfast.svg)](https://pkg.go.dev/github.com/amitray007/brewfast)
+
 **brewfast accelerates Homebrew cask installs whose download comes from a
 throttled GitHub release asset.** GitHub throttles unauthenticated release-asset
 downloads to a fraction of your line speed, so a large `.dmg` or `.pkg` behind a
@@ -87,6 +91,12 @@ tap's GitHub Releases by this repo's release pipeline, and `Formula/brewfast.rb`
 is auto-rendered and pushed to the tap on each release — it is generated, never
 hand-edited. Do not open PRs or issues against the tap.
 
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). brewfast is
+intentionally small and focused, so please open an issue before starting anything
+large. Security issues should be reported privately per [SECURITY.md](SECURITY.md).
+
 ## License
 
-See the repository for license details.
+[MIT](LICENSE) © 2026 Amit Ray.
