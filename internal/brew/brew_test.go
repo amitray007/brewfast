@@ -189,6 +189,24 @@ func TestRunnerInterface(t *testing.T) {
 	}
 }
 
+func TestParseInstalledVersion(t *testing.T) {
+	// Installed: brew prints "<name> <version>".
+	if v, ok := parseInstalledVersion("orpheus-nightly 0.6.0-nightly.20260731\n"); !ok || v != "0.6.0-nightly.20260731" {
+		t.Errorf("parseInstalledVersion(installed) = (%q, %v), want (%q, true)", v, ok, "0.6.0-nightly.20260731")
+	}
+	// Multiple installed versions on one line: take the first version field.
+	if v, ok := parseInstalledVersion("orpheus 1.0.0 1.1.0\n"); !ok || v != "1.0.0" {
+		t.Errorf("parseInstalledVersion(multi) = (%q, %v), want (%q, true)", v, ok, "1.0.0")
+	}
+	// Not installed: brew prints nothing.
+	if v, ok := parseInstalledVersion(""); ok || v != "" {
+		t.Errorf("parseInstalledVersion(empty) = (%q, %v), want (\"\", false)", v, ok)
+	}
+	if v, ok := parseInstalledVersion("   \n"); ok || v != "" {
+		t.Errorf("parseInstalledVersion(blank) = (%q, %v), want (\"\", false)", v, ok)
+	}
+}
+
 func TestIsInstalled(t *testing.T) {
 	// `sh` is on PATH on every POSIX test machine; a random token is not.
 	if !IsInstalled("sh") {

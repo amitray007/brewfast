@@ -311,3 +311,60 @@ func IsInstalled(tool string) bool {
 	_, err := exec.LookPath(tool)
 	return err == nil
 }
+
+// parseInstalledVersion is the pure parser for `brew list --cask --versions`
+// stdout, split out for testing. When the cask is installed, brew prints a
+// single line of the form "<name> <version>" (a token may report more than one
+// installed version; the first is taken). When it is not installed, brew prints
+// nothing (and exits 1). An empty/blank input therefore parses to ("", false):
+// not installed. The second whitespace-delimited field is the version.
+func parseInstalledVersion(stdout string) (string, bool) {
+	line := strings.TrimSpace(stdout)
+	if line == "" {
+		return "", false
+	}
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		// A token with no version field is not a usable "installed" signal.
+		return "", false
+	}
+	return fields[1], true
+}
+
+// InstalledVersion runs `brew list --cask --versions -- <name>` and reports the
+// currently-installed version of the cask, if any. When the cask is installed it
+// returns (version, true, nil); when it is not installed it returns ("", false,
+// nil) — brew exits 1 with empty output for an uninstalled cask, which is a
+// normal "not installed" answer, not an error. A genuine exec failure (e.g. brew
+// missing, or a timeout) is returned as a real error. The name is validated
+// before any exec.
+func InstalledVersion(name string) (string, bool, error) {
+	if err := ValidateName(name); err != nil {
+		return "", false, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), brewCmdTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "brew", "list", "--cask", "--versions", "--", name)
+	out, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", false, fmt.Errorf("brew list for %q timed out after %s", name, brewCmdTimeout)
+		}
+		// brew exits non-zero for a cask that is not installed, printing nothing
+		// to stdout. Treat that (a clean exit-status error with no output) as a
+		// definitive "not installed" answer rather than a failure. Anything that
+		// produced parseable output is honored below.
+		if v, ok := parseInstalledVersion(string(out)); ok {
+			return v, true, nil
+		}
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			// Ran, exited non-zero, produced no installed line → not installed.
+			return "", false, nil
+		}
+		// Could not run brew at all (not found, permission, etc.) → real error.
+		return "", false, fmt.Errorf("running brew list for %q: %w", name, err)
+	}
+	v, ok := parseInstalledVersion(string(out))
+	return v, ok, nil
+}
