@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/amitray007/brewfast/compare/brewfast-v1.0.1...brewfast-v1.0.2) (2026-08-01)
+
+
+### Bug Fixes
+
+* clean download progress, non-interactive brew, aria2c detection ([#7](https://github.com/amitray007/brewfast/issues/7)) ([c71e5f7](https://github.com/amitray007/brewfast/commit/c71e5f7e1642d9bf4476246ac6126df2c151d94c))
+
 ## [1.0.1](https://github.com/amitray007/brewfast/compare/brewfast-v1.0.0...brewfast-v1.0.1) (2026-08-01)
 
 
