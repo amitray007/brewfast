@@ -225,11 +225,13 @@ func aria2Download(dir, name, rawurl string, interactive bool) error {
 	// these flags collapse it to a single clean, updating readout line showing
 	// overall progress, aggregate speed, ETA, and the live connection count.
 	if interactive {
-		// Interactive terminal: quiet the per-file info spam, keep the live
-		// one-line readout that updates in place (overall + per-connection).
+		// Interactive terminal: ONLY the live one-line readout that updates in
+		// place (overall progress, aggregate speed, ETA, connection count).
+		// --summary-interval=0 turns off aria2's periodic multi-line summary
+		// block so the single readout line is all the user sees.
 		args = append(args,
 			"--console-log-level=warn",
-			"--summary-interval=1",
+			"--summary-interval=0",
 			"--show-console-readout=true",
 			"--human-readable=true",
 		)
