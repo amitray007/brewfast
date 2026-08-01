@@ -22,14 +22,15 @@ import (
 // behavior, so runInstall can be exercised end-to-end with fakes — no brew,
 // aria2, or network required.
 type deps struct {
-	caskInfo     func(string) (*brew.Cask, error)
-	cachePath    func(string) (string, error)
-	isInstalled  func(string) bool
-	installAria2 func() error
-	isSlowHost   func(string) bool
-	resolve      func(string, resolve.Options) (string, *brew.Cask, error)
-	fetch        func(accel.Params) error
-	handoff      func(ctx context.Context, op brew.Operation, name string) error
+	caskInfo         func(string) (*brew.Cask, error)
+	cachePath        func(string) (string, error)
+	isInstalled      func(string) bool
+	installedVersion func(string) (string, bool, error)
+	installAria2     func() error
+	isSlowHost       func(string) bool
+	resolve          func(string, resolve.Options) (string, *brew.Cask, error)
+	fetch            func(accel.Params) error
+	handoff          func(ctx context.Context, op brew.Operation, name string) error
 
 	stdout io.Writer
 	stderr io.Writer
@@ -73,9 +74,10 @@ func exitCodeFor(err error) int {
 // command's stdout/stderr so tests of the cobra layer can still redirect I/O.
 func realDeps(cmd *cobra.Command) deps {
 	return deps{
-		caskInfo:    brew.CaskInfo,
-		cachePath:   brew.CachePath,
-		isInstalled: brew.IsInstalled,
+		caskInfo:         brew.CaskInfo,
+		cachePath:        brew.CachePath,
+		isInstalled:      brew.IsInstalled,
+		installedVersion: brew.InstalledVersion,
 		installAria2: func() error {
 			c := exec.Command("brew", "install", "aria2")
 			c.Stdout = os.Stderr
@@ -100,7 +102,10 @@ func realDeps(cmd *cobra.Command) deps {
 //
 // The branch structure mirrors R5–R11 and R19/R26:
 //  1. resolve the name,
-//  2. read the cask (url + sha256),
+//  2. read the cask (url + sha256 + version),
+//     2b. install-state gate: an already-current cask short-circuits to a clean
+//     no-op (no download, no handoff) unless --reinstall is set; otherwise the
+//     handoff op is chosen (upgrade if outdated, reinstall if absent/forced),
 //  3. host gate (slow-path? else --any-host / --fallback / stop),
 //  4. ensure aria2 (R18),
 //  5. fetch + verify (checksum mismatch always fatal; no-checksum posture),
@@ -151,6 +156,40 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 		}
 	}
 
+	// 2b. Install-state gate. Read the currently-installed version (if any) and
+	// decide the handoff operation up front, so an already-current cask can
+	// short-circuit before we touch the network — regardless of host. This is the
+	// fix for the "reinstall always tears down and re-lays the app" bug: plain
+	// `brew upgrade` no-ops when current, and brewfast now behaves the same.
+	//
+	//  • --reinstall            → force OpReinstall, skip the up-to-date short-circuit
+	//  • installed & current    → NO-OP (return clean, no download, no handoff)
+	//  • installed & outdated   → OpUpgrade
+	//  • not installed          → OpReinstall (reinstall-from-cache installs it)
+	op := brew.OpReinstall
+	if !flags.reinstall {
+		instVer, installed, err := d.installedVersion(resolved)
+		if err != nil {
+			return stopf(1, "reading install state for %q: %v", resolved, err)
+		}
+		switch {
+		case installed && instVer == cask.Version:
+			// Already up to date: skip the whole accelerate+handoff pipeline.
+			if !flags.quiet {
+				fmt.Fprintf(d.stdout,
+					"brewfast: %s is already up to date (%s); nothing to do (use --reinstall to force).\n",
+					resolved, cask.Version)
+			}
+			return nil
+		case installed:
+			// Installed but outdated → upgrade in place.
+			op = brew.OpUpgrade
+		default:
+			// Not installed → reinstall-from-cache installs it.
+			op = brew.OpReinstall
+		}
+	}
+
 	// 3. Host gate.
 	slow := d.isSlowHost(cask.URL)
 	if !slow {
@@ -158,7 +197,7 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 		case flags.fallback:
 			// Non-slow host + --fallback: hand off to plain brew (F4 fallback).
 			fmt.Fprintf(d.stderr, "brewfast: %s is already CDN-fast; handing off to plain brew (--fallback).\n", resolved)
-			return d.handoff(ctx, handoffOp, resolved)
+			return d.handoff(ctx, op, resolved)
 		case anyHost:
 			// --any-host (or --force) override: accelerate anyway.
 			fmt.Fprintf(d.stderr, "brewfast: %s is not a recognized slow host; accelerating anyway (--any-host).\n", resolved)
@@ -207,7 +246,7 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 				// Proceed unverified: fall through to the no-verify warning + handoff.
 			case flags.fallback:
 				fmt.Fprintf(d.stderr, "brewfast: %s declares no checksum; handing off to plain brew (--fallback).\n", resolved)
-				return d.handoff(ctx, handoffOp, resolved)
+				return d.handoff(ctx, op, resolved)
 			default:
 				return stopf(1, "%s", firstImpressionNoChecksum(resolved))
 			}
@@ -238,7 +277,7 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 	os.Setenv("HOMEBREW_NO_AUTO_UPDATE", "1")
 
 	start := time.Now()
-	if err := d.handoff(ctx, handoffOp, resolved); err != nil {
+	if err := d.handoff(ctx, op, resolved); err != nil {
 		// Propagate brew's exit status verbatim (no extra wrapping message so the
 		// exit code maps cleanly).
 		return err
@@ -255,13 +294,6 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 	}
 	return nil
 }
-
-// handoffOp is the brew operation used for every accelerated handoff.
-// `brew reinstall --cask` installs the cask definition's current version from
-// the freshly cached file whether or not the cask is already present, so it
-// covers both first install and upgrade. (A cask token is never on $PATH, so a
-// LookPath-based installed check would be both wrong and wasted work here.)
-const handoffOp = brew.OpReinstall
 
 // firstImpressionHost is the R19 message for the already-fast-host default stop:
 // it frames the non-acceleration as expected, not a failure, and names the two

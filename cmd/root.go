@@ -28,12 +28,13 @@ func SetVersion(v string) {
 // plain value carried into the install pipeline (see runInstall) so the flag
 // surface and the flow logic stay decoupled and independently testable.
 type postureFlags struct {
-	fallback bool
-	anyHost  bool
-	noVerify bool
-	force    bool
-	noInput  bool
-	quiet    bool
+	fallback  bool
+	anyHost   bool
+	noVerify  bool
+	force     bool
+	noInput   bool
+	quiet     bool
+	reinstall bool
 }
 
 // newRootCmd builds the brewfast root command. It is a constructor (rather than
@@ -74,6 +75,7 @@ func newRootCmd() *cobra.Command {
 	pf.BoolVar(&flags.force, "force", false, "attempt the fast path even in cases the default would refuse")
 	pf.BoolVar(&flags.noInput, "yes", false, "never prompt; take the non-interactive path even in a terminal")
 	pf.BoolVar(&flags.quiet, "quiet", false, "suppress the success/status line for scriptable consumers")
+	pf.BoolVar(&flags.reinstall, "reinstall", false, "reinstall from the accelerated cache even if already up to date")
 
 	// --no-input is an alias for --yes.
 	pf.BoolVar(&flags.noInput, "no-input", false, "alias for --yes")

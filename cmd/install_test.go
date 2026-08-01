@@ -29,7 +29,11 @@ func fakeDeps(rec *recorder, cask *brew.Cask) (deps, *bytes.Buffer, *bytes.Buffe
 	d := deps{
 		caskInfo:    func(string) (*brew.Cask, error) { return cask, nil },
 		cachePath:   func(string) (string, error) { return "/tmp/cache/abc--" + cask.Token + ".dmg", nil },
-		isInstalled: func(string) bool { return true }, // aria2 present, cask installed
+		isInstalled: func(string) bool { return true }, // aria2 present
+		// Default: the cask is NOT installed, so the happy-path tests below still
+		// accelerate + reinstall-from-cache (the up-to-date short-circuit only
+		// triggers when a test overrides this to report the current version).
+		installedVersion: func(string) (string, bool, error) { return "", false, nil },
 		installAria2: func() error {
 			rec.installAria2Calls++
 			return nil
@@ -291,17 +295,96 @@ func TestHappyPath_Accelerates(t *testing.T) {
 	}
 }
 
-// Not-yet-installed cask → reinstall-from-cache op.
+// Not-yet-installed cask → fetch + reinstall-from-cache op.
 func TestNotInstalled_UsesReinstall(t *testing.T) {
 	rec := &recorder{}
 	d, _, _ := fakeDeps(rec, sampleCask())
-	d.isInstalled = func(tool string) bool { return tool == "aria2" } // aria2 present, cask not
+	d.installedVersion = func(string) (string, bool, error) { return "", false, nil } // not installed
 
 	if err := runInstall(context.Background(), d, postureFlags{}, "orpheus-nightly"); err != nil {
 		t.Fatalf("happy path should succeed, got: %v", err)
 	}
+	if !rec.fetchCalled {
+		t.Fatal("expected fetch for a not-installed cask")
+	}
+	if !rec.handoffCalled {
+		t.Fatal("expected handoff for a not-installed cask")
+	}
 	if rec.handoffOp != brew.OpReinstall {
 		t.Fatalf("expected reinstall op for a not-installed cask, got %q", rec.handoffOp)
+	}
+}
+
+// KEY REGRESSION: installed AND at the current version, no --reinstall → NO-OP.
+// The whole accelerate+handoff pipeline is skipped: fetch is NOT called, handoff
+// is NOT called, and stdout says the cask is already up to date. This is the fix
+// for `brew reinstall` needlessly tearing down and re-laying an up-to-date app.
+func TestAlreadyCurrent_NoOp(t *testing.T) {
+	rec := &recorder{}
+	cask := sampleCask()
+	d, out, _ := fakeDeps(rec, cask)
+	d.installedVersion = func(string) (string, bool, error) { return cask.Version, true, nil }
+
+	err := runInstall(context.Background(), d, postureFlags{}, "orpheus-nightly")
+	if err != nil {
+		t.Fatalf("an already-current cask must be a clean no-op, got: %v", err)
+	}
+	if rec.fetchCalled {
+		t.Fatal("no download must happen when already up to date")
+	}
+	if rec.handoffCalled {
+		t.Fatal("no handoff must happen when already up to date")
+	}
+	if !strings.Contains(out.String(), "up to date") {
+		t.Fatalf("expected an 'up to date' message on stdout, got: %q", out.String())
+	}
+	if !strings.Contains(out.String(), cask.Version) {
+		t.Fatalf("up-to-date message must name the version, got: %q", out.String())
+	}
+}
+
+// Already current BUT --reinstall passed → proceed and reinstall from the freshly
+// accelerated cache (fetch + handoff with OpReinstall).
+func TestAlreadyCurrent_Reinstall_Proceeds(t *testing.T) {
+	rec := &recorder{}
+	cask := sampleCask()
+	d, _, _ := fakeDeps(rec, cask)
+	d.installedVersion = func(string) (string, bool, error) { return cask.Version, true, nil }
+
+	err := runInstall(context.Background(), d, postureFlags{reinstall: true}, "orpheus-nightly")
+	if err != nil {
+		t.Fatalf("--reinstall should proceed even when current, got: %v", err)
+	}
+	if !rec.fetchCalled {
+		t.Fatal("expected fetch under --reinstall")
+	}
+	if !rec.handoffCalled {
+		t.Fatal("expected handoff under --reinstall")
+	}
+	if rec.handoffOp != brew.OpReinstall {
+		t.Fatalf("--reinstall must force OpReinstall, got %q", rec.handoffOp)
+	}
+}
+
+// Installed but OUTDATED → accelerate and hand off with OpUpgrade.
+func TestOutdated_UsesUpgrade(t *testing.T) {
+	rec := &recorder{}
+	cask := sampleCask() // Version "1.2.3"
+	d, _, _ := fakeDeps(rec, cask)
+	d.installedVersion = func(string) (string, bool, error) { return "1.0.0", true, nil }
+
+	err := runInstall(context.Background(), d, postureFlags{}, "orpheus-nightly")
+	if err != nil {
+		t.Fatalf("outdated cask should accelerate + upgrade, got: %v", err)
+	}
+	if !rec.fetchCalled {
+		t.Fatal("expected fetch for an outdated cask")
+	}
+	if !rec.handoffCalled {
+		t.Fatal("expected handoff for an outdated cask")
+	}
+	if rec.handoffOp != brew.OpUpgrade {
+		t.Fatalf("an outdated cask must hand off with OpUpgrade, got %q", rec.handoffOp)
 	}
 }
 
