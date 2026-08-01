@@ -74,7 +74,7 @@ func runDoctor(out io.Writer) error {
 func reportHealth(out io.Writer) {
 	fmt.Fprintln(out, "Health")
 	line(out, brew.IsInstalled("brew"), "brew present", "brew not found on PATH — install Homebrew")
-	line(out, brew.IsInstalled("aria2"), "aria2 present", "aria2 not found — brewfast installs it on first use")
+	line(out, brew.IsInstalled("aria2c"), "aria2 present", "aria2 not found — brewfast installs it on first use")
 	line(out, isTTY(os.Stdin), "stdin is a TTY (interactive prompts available)", "stdin is not a TTY (running non-interactively)")
 	line(out, tapReachable(), "tap reachable", "tap not reachable (network or brew unavailable) — best-effort check")
 }

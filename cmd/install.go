@@ -34,6 +34,10 @@ type deps struct {
 
 	stdout io.Writer
 	stderr io.Writer
+	// stdinIsTTY reports whether the process has a terminal on stdin — i.e.
+	// whether a brew prompt could actually be answered. Injected so tests can
+	// drive both the interactive and non-interactive branches.
+	stdinIsTTY bool
 }
 
 // exitError carries an explicit process exit code alongside a message, so the
@@ -83,6 +87,11 @@ func realDeps(cmd *cobra.Command) deps {
 			c.Stdout = os.Stderr
 			c.Stderr = os.Stderr
 			c.Stdin = os.Stdin
+			// aria2 is a bottled formula and normally installs without a prompt,
+			// but pin non-interactive with no TTY so it can never hang either.
+			if !isTTY(os.Stdin) {
+				c.Env = append(os.Environ(), "HOMEBREW_NO_INTERACTIVE=1")
+			}
 			return c.Run()
 		},
 		isSlowHost: host.IsSlowHost,
@@ -91,8 +100,9 @@ func realDeps(cmd *cobra.Command) deps {
 		handoff: func(ctx context.Context, op brew.Operation, name string) error {
 			return handoff.New().Run(ctx, op, name)
 		},
-		stdout: cmd.OutOrStdout(),
-		stderr: cmd.ErrOrStderr(),
+		stdout:     cmd.OutOrStdout(),
+		stderr:     cmd.ErrOrStderr(),
+		stdinIsTTY: isTTY(os.Stdin),
 	}
 }
 
@@ -208,7 +218,10 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 	}
 
 	// 4. Ensure aria2 is present (R18 install half).
-	if !d.isInstalled("aria2") {
+	// The formula is "aria2" but the binary brewfast actually runs is "aria2c",
+	// so the presence check must look for aria2c (looking for "aria2" always
+	// misses and re-runs `brew install aria2` on every invocation).
+	if !d.isInstalled("aria2c") {
 		fmt.Fprintln(d.stderr, "brewfast: aria2 is required for accelerated downloads; installing it via brew...")
 		if err := d.installAria2(); err != nil {
 			return stopf(1, "brewfast: could not install aria2 automatically (%v)\n"+
@@ -225,10 +238,14 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 	// Under --no-verify, we accept a cask that declares no checksum. We pass the
 	// expected sha through unchanged; a genuine mismatch is ALWAYS fatal
 	// (below), --no-verify only tolerates a *missing* checksum.
+	// Show aria2's live progress readout only when stderr is a real terminal and
+	// the user hasn't asked for quiet; otherwise aria2 emits a quiet periodic
+	// summary instead of an in-place readout that would spam a log or pipe.
 	fetchErr := d.fetch(accel.Params{
 		URL:         cask.URL,
 		CachePath:   cachePath,
 		ExpectedSHA: cask.SHA256,
+		Interactive: !flags.quiet && isTTY(d.stderr),
 	})
 	if fetchErr != nil {
 		switch {
@@ -275,6 +292,13 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 		return stopf(1, "brewfast: brew's cache path for %s moved between download and handoff (%s -> %s); aborting to avoid installing a stale file", resolved, cachePath, fresh)
 	}
 	os.Setenv("HOMEBREW_NO_AUTO_UPDATE", "1")
+	// When there is no terminal to answer a brew prompt (CI, piped, scripted),
+	// pin HOMEBREW_NO_INTERACTIVE=1 so brew fails fast instead of hanging forever
+	// on a question nobody can answer. In a real terminal we leave it unset so a
+	// cask that legitimately needs your login password can still prompt.
+	if !d.stdinIsTTY {
+		os.Setenv("HOMEBREW_NO_INTERACTIVE", "1")
+	}
 
 	start := time.Now()
 	if err := d.handoff(ctx, op, resolved); err != nil {

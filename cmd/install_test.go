@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -234,7 +235,7 @@ func TestAria2Absent_Installs(t *testing.T) {
 	rec := &recorder{}
 	d, _, errBuf := fakeDeps(rec, sampleCask())
 	// aria2 missing, but cask reports installed for op selection.
-	d.isInstalled = func(tool string) bool { return tool != "aria2" }
+	d.isInstalled = func(tool string) bool { return tool != "aria2c" }
 
 	err := runInstall(context.Background(), d, postureFlags{}, "orpheus-nightly")
 	if err != nil {
@@ -252,7 +253,7 @@ func TestAria2Absent_Installs(t *testing.T) {
 func TestAria2InstallFailure_ClearError(t *testing.T) {
 	rec := &recorder{}
 	d, _, _ := fakeDeps(rec, sampleCask())
-	d.isInstalled = func(tool string) bool { return tool != "aria2" }
+	d.isInstalled = func(tool string) bool { return tool != "aria2c" }
 	d.installAria2 = func() error {
 		rec.installAria2Calls++
 		return errors.New("brew exploded")
@@ -507,6 +508,101 @@ func TestResolveNoInteractive_NonZero(t *testing.T) {
 	}
 	if rec.fetchCalled {
 		t.Fatal("nothing should be fetched when resolution fails")
+	}
+}
+
+// Change 1: aria2 progress presentation follows the TTY. runInstall sets
+// accel.Params.Interactive = !quiet && isTTY(stderr). The default fakeDeps wires
+// stderr to a *bytes.Buffer (not a *os.File), so isTTY(stderr) is false and the
+// recorded fetch params must carry Interactive=false — the non-TTY path. With
+// --quiet it is false regardless.
+//
+// Note: the Interactive=true branch requires a real terminal on stderr, which a
+// unit test cannot fake (isTTY only returns true for an *os.File whose Stat
+// reports os.ModeCharDevice). We therefore assert only the two deterministically
+// reachable cases — non-TTY and --quiet — which is the testable half. The
+// TTY-true wiring is exercised via the isTTY unit and by manual/integration use.
+func TestFetch_InteractiveFlag_FollowsTTY(t *testing.T) {
+	// Non-TTY stderr (a buffer) → Interactive must be false.
+	rec := &recorder{}
+	d, _, _ := fakeDeps(rec, sampleCask())
+
+	if err := runInstall(context.Background(), d, postureFlags{}, "orpheus-nightly"); err != nil {
+		t.Fatalf("happy path should succeed, got: %v", err)
+	}
+	if !rec.fetchCalled {
+		t.Fatal("expected fetch to be called")
+	}
+	if rec.fetchParams.Interactive {
+		t.Fatalf("Interactive must be false when stderr is not a TTY, got true")
+	}
+
+	// --quiet → Interactive must be false regardless of the stderr kind.
+	recQ := &recorder{}
+	dQ, _, _ := fakeDeps(recQ, sampleCask())
+
+	if err := runInstall(context.Background(), dQ, postureFlags{quiet: true}, "orpheus-nightly"); err != nil {
+		t.Fatalf("--quiet happy path should succeed, got: %v", err)
+	}
+	if !recQ.fetchCalled {
+		t.Fatal("expected fetch to be called under --quiet")
+	}
+	if recQ.fetchParams.Interactive {
+		t.Fatalf("Interactive must be false under --quiet, got true")
+	}
+}
+
+// Change 2 (the important one): with no TTY on stdin, runInstall pins
+// HOMEBREW_NO_INTERACTIVE=1 for the brew child so brew fails fast instead of
+// hanging on a prompt nobody can answer. The default fakeDeps leaves
+// stdinIsTTY=false (its zero value), so a successful handoff must set the env.
+//
+// Env isolation: runInstall calls os.Setenv directly (not t.Setenv), which
+// mutates global process env and would leak across tests. t.Setenv here
+// establishes a known "" baseline AND registers automatic restore of the
+// original value at test end, so the mutation runInstall makes cannot leak.
+func TestHandoff_NonInteractiveEnv_WhenNoTTY(t *testing.T) {
+	t.Setenv("HOMEBREW_NO_INTERACTIVE", "") // known baseline + auto-restore after the test
+
+	rec := &recorder{}
+	d, _, _ := fakeDeps(rec, sampleCask())
+	// Default fakeDeps: not installed, slow host, valid fetch, stdinIsTTY=false.
+	if d.stdinIsTTY {
+		t.Fatal("precondition: default fakeDeps must have stdinIsTTY=false")
+	}
+
+	if err := runInstall(context.Background(), d, postureFlags{}, "orpheus-nightly"); err != nil {
+		t.Fatalf("happy path should succeed, got: %v", err)
+	}
+	if !rec.handoffCalled {
+		t.Fatal("expected a handoff so the env pin is exercised")
+	}
+	if got := os.Getenv("HOMEBREW_NO_INTERACTIVE"); got != "1" {
+		t.Fatalf("HOMEBREW_NO_INTERACTIVE = %q, want \"1\" when stdin is not a TTY", got)
+	}
+}
+
+// Change 2 (interactive half): with a TTY on stdin, brewfast must NOT force
+// non-interactive — a cask that legitimately needs a login password can still
+// prompt. Assert the env is left unset (still the "" baseline).
+//
+// Env isolation: same as above — t.Setenv gives a clean "" baseline and auto
+// restores the original HOMEBREW_NO_INTERACTIVE when the test ends.
+func TestHandoff_Interactive_LeavesEnvUnset_WhenTTY(t *testing.T) {
+	t.Setenv("HOMEBREW_NO_INTERACTIVE", "") // known baseline + auto-restore after the test
+
+	rec := &recorder{}
+	d, _, _ := fakeDeps(rec, sampleCask())
+	d.stdinIsTTY = true // pretend a terminal is present on stdin
+
+	if err := runInstall(context.Background(), d, postureFlags{}, "orpheus-nightly"); err != nil {
+		t.Fatalf("happy path should succeed, got: %v", err)
+	}
+	if !rec.handoffCalled {
+		t.Fatal("expected a handoff to run")
+	}
+	if got := os.Getenv("HOMEBREW_NO_INTERACTIVE"); got != "" {
+		t.Fatalf("HOMEBREW_NO_INTERACTIVE = %q, want \"\" (unset) when a TTY is present", got)
 	}
 }
 
