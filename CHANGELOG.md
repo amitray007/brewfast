@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.3](https://github.com/amitray007/brewfast/compare/brewfast-v1.0.2...brewfast-v1.0.3) (2026-08-01)
+
+
+### Bug Fixes
+
+* don't offer tap-qualified formulae as cask candidates ([#9](https://github.com/amitray007/brewfast/issues/9)) ([0c76e61](https://github.com/amitray007/brewfast/commit/0c76e614eef564323489fb7e8aea8dce6067b677))
+
 ## [1.0.2](https://github.com/amitray007/brewfast/compare/brewfast-v1.0.1...brewfast-v1.0.2) (2026-08-01)
 
 
