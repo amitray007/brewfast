@@ -219,6 +219,18 @@ func TestCandidatesFilterDropsSelfAndDupes(t *testing.T) {
 	}
 }
 
+// TestCandidatesFilterDropsMalformed is the defense-in-depth regression for the
+// `brewfast brewfast` error: a leftover slashed "owner/tap/name" reference is
+// not a valid cask token, so it must be dropped before it can reach
+// brew.CaskInfo and surface a validation error.
+func TestCandidatesFilterDropsMalformed(t *testing.T) {
+	got := filterCaskCandidates([]string{"amitray007/tap/brewfast", "orpheus", "--evil"}, "brewfast")
+	want := []string{"orpheus"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("malformed candidates must be dropped; got %v, want %v", got, want)
+	}
+}
+
 // TestLookupErrorSurfaced verifies a non-not-found lookup error is surfaced
 // rather than swallowed, and does not fall through to candidate gathering.
 func TestLookupErrorSurfaced(t *testing.T) {

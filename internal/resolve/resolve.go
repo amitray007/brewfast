@@ -173,16 +173,23 @@ func (o Options) tty() bool {
 	return term.IsTerminal(int(o.Stdin.Fd()))
 }
 
-// filterCaskCandidates drops obvious non-cask names and de-duplicates while
-// preserving order. brew.SearchCandidates already scopes to cask sections and
-// tap-qualified lines; this is a light second pass. A tap-qualified
-// "owner/tap/token" candidate is kept as-is (it is a valid cask reference brew
-// accepts). The name itself is never proposed as its own suggestion.
+// filterCaskCandidates drops non-cask and malformed names and de-duplicates
+// while preserving order. brew.SearchCandidates already scopes to cask sections
+// and reduces tap-qualified lines to bare tokens; this is a defense-in-depth
+// second pass that guarantees every surviving candidate is a valid cask token,
+// so a slashed or otherwise malformed name can never flow into brew.CaskInfo and
+// surface a validation error to the user. The query name itself is never
+// proposed as its own suggestion.
 func filterCaskCandidates(candidates []string, name string) []string {
 	out := make([]string, 0, len(candidates))
 	seen := make(map[string]bool)
 	for _, c := range candidates {
 		if c == "" || c == name || seen[c] {
+			continue
+		}
+		// Drop anything that is not a valid cask token (e.g. a leftover
+		// "owner/tap/name" reference); it can never resolve as a cask.
+		if brew.ValidateName(c) != nil {
 			continue
 		}
 		seen[c] = true
