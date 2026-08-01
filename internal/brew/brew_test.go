@@ -57,10 +57,12 @@ func TestParseCaskInfo_Malformed(t *testing.T) {
 	}
 }
 
-// A `brew search orpheus`-style fixture: a Casks section plus a tap-qualified
-// line, and a Formulae section that must be excluded.
+// A `brew search orpheus`-style fixture: a Casks section with a tap-qualified
+// cask line, plus a Formulae section (including its own tap-qualified line) that
+// must be excluded.
 const searchFixture = `==> Formulae
 morph
+amitray007/tap/orpheus-cli
 ==> Casks
 morpheus
 orpheus
@@ -70,9 +72,23 @@ amitray007/tap/orpheus-beta
 
 func TestParseSearchOutput(t *testing.T) {
 	got := parseSearchOutput(searchFixture)
-	want := []string{"morpheus", "orpheus", "orpheus-nightly", "amitray007/tap/orpheus-beta"}
+	// Tap-qualified cask lines are reduced to their bare token; the tap-qualified
+	// FORMULA line (orpheus-cli) is dropped entirely.
+	want := []string{"morpheus", "orpheus", "orpheus-nightly", "orpheus-beta"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseSearchOutput() = %v, want %v", got, want)
+	}
+}
+
+// TestParseSearchOutput_TapFormulaExcluded is the regression for `brewfast
+// brewfast`: searching a name whose only match is a tap-qualified FORMULA
+// (brewfast itself) must yield zero cask candidates — not a slashed name that
+// later fails cask-name validation.
+func TestParseSearchOutput_TapFormulaExcluded(t *testing.T) {
+	fixture := "==> Formulae\namitray007/tap/brewfast\nbeast\n"
+	got := parseSearchOutput(fixture)
+	if len(got) != 0 {
+		t.Errorf("a tap-qualified formula must not be a cask candidate; got %v", got)
 	}
 }
 

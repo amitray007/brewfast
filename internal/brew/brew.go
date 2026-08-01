@@ -155,10 +155,15 @@ func parseSearchOutput(stdout string) []string {
 			}
 			continue
 		}
-		// A tap-qualified "owner/tap/name" line is a cask candidate regardless
-		// of the current section.
+		// A tap-qualified "owner/tap/name" line is a candidate ONLY when it
+		// appears under the Casks section — the same line can appear under
+		// Formulae (e.g. a tap's own CLI formula), and those are not casks.
+		// Reduce it to the bare token so it passes cask-name validation and
+		// refers to the cask correctly downstream.
 		if strings.Count(line, "/") >= 2 {
-			add(line)
+			if section == sectionCasks {
+				add(tapToken(line))
+			}
 			continue
 		}
 		if section == sectionCasks {
@@ -166,6 +171,15 @@ func parseSearchOutput(stdout string) []string {
 		}
 	}
 	return candidates
+}
+
+// tapToken reduces a tap-qualified "owner/tap/name" reference to its bare
+// "name" token. A non-tap-qualified string is returned unchanged.
+func tapToken(s string) string {
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		return s[i+1:]
+	}
+	return s
 }
 
 // Runner is the handoff surface: it runs a command (e.g. `brew reinstall`) so
