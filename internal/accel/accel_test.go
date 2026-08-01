@@ -108,7 +108,7 @@ func TestFetch_NoChecksumRemovesStaleFile(t *testing.T) {
 	existedAtCall := true
 	sidecarAtCall := true
 	d := Downloader{
-		Download: func(gotDir, gotName, _ string) error {
+		Download: func(gotDir, gotName, _ string, _ bool) error {
 			if _, statErr := os.Stat(filepath.Join(gotDir, gotName)); errors.Is(statErr, os.ErrNotExist) {
 				existedAtCall = false
 			}
@@ -170,7 +170,7 @@ func TestFetch_MatchingHash(t *testing.T) {
 	cachePath := filepath.Join(dir, name)
 
 	d := Downloader{
-		Download: func(gotDir, gotName, gotURL string) error {
+		Download: func(gotDir, gotName, gotURL string, _ bool) error {
 			if gotDir != dir {
 				t.Errorf("download dir = %q, want %q", gotDir, dir)
 			}
@@ -219,7 +219,7 @@ func TestFetch_SidecarRemovedOnSuccess(t *testing.T) {
 	cachePath := filepath.Join(dir, name)
 
 	d := Downloader{
-		Download: func(gotDir, gotName, _ string) error {
+		Download: func(gotDir, gotName, _ string, _ bool) error {
 			writeFile(t, gotDir, gotName, content)
 			// Simulate aria2 leaving its control file behind.
 			writeFile(t, gotDir, gotName+".aria2", []byte("control"))
@@ -251,7 +251,7 @@ func TestFetch_MismatchDiscards(t *testing.T) {
 	cachePath := filepath.Join(dir, name)
 
 	d := Downloader{
-		Download: func(gotDir, gotName, _ string) error {
+		Download: func(gotDir, gotName, _ string, _ bool) error {
 			writeFile(t, gotDir, gotName, []byte("corrupt payload"))
 			writeFile(t, gotDir, gotName+".aria2", []byte("control"))
 			return nil
@@ -285,7 +285,7 @@ func TestFetch_EmptyChecksum(t *testing.T) {
 	cachePath := filepath.Join(dir, name)
 
 	d := Downloader{
-		Download: func(gotDir, gotName, _ string) error {
+		Download: func(gotDir, gotName, _ string, _ bool) error {
 			writeFile(t, gotDir, gotName, content)
 			return nil
 		},
@@ -312,7 +312,7 @@ func TestFetch_NonHTTPS(t *testing.T) {
 	called := false
 
 	d := Downloader{
-		Download: func(_, _, _ string) error {
+		Download: func(_, _, _ string, _ bool) error {
 			called = true
 			return nil
 		},

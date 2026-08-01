@@ -54,9 +54,11 @@ var ErrNoChecksum = errors.New("no expected checksum")
 var ErrInsecureURL = errors.New("asset url is not https")
 
 // downloadFunc runs the actual byte transfer, writing the asset to
-// filepath.Join(dir, name). It is an indirection so tests can inject a fake
-// that writes known bytes without invoking real aria2 or touching the network.
-type downloadFunc func(dir, name, rawurl string) error
+// filepath.Join(dir, name). interactive selects aria2's progress presentation
+// (a live in-place readout for a TTY, a quiet periodic summary otherwise). It is
+// an indirection so tests can inject a fake that writes known bytes without
+// invoking real aria2 or touching the network.
+type downloadFunc func(dir, name, rawurl string, interactive bool) error
 
 // Downloader accelerates a single cask asset download and verifies it.
 //
@@ -80,6 +82,10 @@ type Params struct {
 	// ExpectedSHA is the cask's declared lower-hex SHA-256. Empty yields
 	// ErrNoChecksum (posture is the caller's decision).
 	ExpectedSHA string
+	// Interactive is true when brewfast is attached to a terminal, so aria2
+	// should show its live updating readout; false (CI/piped) selects a quiet
+	// periodic summary instead of an in-place readout that just spams the log.
+	Interactive bool
 }
 
 // Fetch runs the accelerated download-then-verify for a single asset:
@@ -127,7 +133,7 @@ func (d Downloader) Fetch(p Params) error {
 	if transfer == nil {
 		transfer = aria2Download
 	}
-	if err := transfer(dir, name, p.URL); err != nil {
+	if err := transfer(dir, name, p.URL, p.Interactive); err != nil {
 		return fmt.Errorf("aria2 download of %q: %w", p.URL, err)
 	}
 
@@ -205,9 +211,8 @@ func verifyChecksum(path, expectedSHA string) error {
 // aria2Download is the real transfer: it invokes aria2c with 16 parallel
 // connections writing directly to dir/name. `--` terminates option parsing
 // before the url so a dash-leading url can never be read as a flag.
-func aria2Download(dir, name, rawurl string) error {
-	cmd := exec.Command(
-		"aria2c",
+func aria2Download(dir, name, rawurl string, interactive bool) error {
+	args := []string{
 		"--check-certificate=true",
 		// Stall guard: abort a connection that makes no meaningful progress
 		// (slow-loris server) rather than hanging brewfast forever under CI or
@@ -215,10 +220,33 @@ func aria2Download(dir, name, rawurl string) error {
 		"--lowest-speed-limit=1K",
 		"--timeout=60",
 		"-x16", "-s16", "-k1M", "-c",
-		"-o", name,
-		"-d", dir,
-		"--", rawurl,
-	)
+	}
+	// Progress presentation. aria2's default output is a noisy multi-line dump;
+	// these flags collapse it to a single clean, updating readout line showing
+	// overall progress, aggregate speed, ETA, and the live connection count.
+	if interactive {
+		// Interactive terminal: quiet the per-file info spam, keep the live
+		// one-line readout that updates in place (overall + per-connection).
+		args = append(args,
+			"--console-log-level=warn",
+			"--summary-interval=1",
+			"--show-console-readout=true",
+			"--human-readable=true",
+		)
+	} else {
+		// No TTY (CI, piped, scripted): the in-place readout is meaningless and
+		// just spams the log. Drop it entirely and print a single summary line
+		// per 30s so a long download still shows liveness without noise.
+		args = append(args,
+			"--console-log-level=warn",
+			"--summary-interval=30",
+			"--show-console-readout=false",
+			"--human-readable=true",
+		)
+	}
+	args = append(args, "-o", name, "-d", dir, "--", rawurl)
+
+	cmd := exec.Command("aria2c", args...)
 	cmd.Stdout = os.Stderr // progress goes to stderr; keep stdout clean.
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
