@@ -22,6 +22,16 @@
 // SIGHUP is included deliberately: closing the terminal is a real-world wedge
 // vector (the originating incident class), not just an interactive Ctrl-C.
 //
+// Step 1 has a consequence that must be paid for explicitly: a process in a
+// background group that READS the terminal is stopped by SIGTTIN. Left
+// unaddressed, brew's interactive prompts ("Do you want to proceed with the
+// upgrade? [y/n]") print and then hang forever. So the handoff also transfers
+// terminal foreground ownership to brew's group for the duration of the run and
+// restores it afterwards — see terminal.go. While brew holds the terminal, a
+// Ctrl-C goes to brew (which aborts its own prompt cleanly) rather than to
+// brewfast; the guard above still covers every signal delivered to brewfast
+// itself.
+//
 // Full daemon-style detachment (surviving SIGKILL of brewfast) is out of scope
 // and deferred; SIGKILL and a deliberate second interrupt may still terminate
 // the child at the OS level. That is documented, not silently swallowed.
@@ -170,11 +180,24 @@ func (h *Handoff) Run(ctx context.Context, op brew.Operation, name string) error
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting brew handoff: %w", err)
 	}
+
+	// Hand the controlling terminal to brew's process group. Setpgid above put
+	// brew in a BACKGROUND group, and a background process that reads the
+	// terminal is stopped by SIGTTIN — so without this, any interactive brew
+	// prompt ("Do you want to proceed with the upgrade? [y/n]") would print and
+	// then hang forever with the user's keystrokes going to the shell instead.
+	// See terminal.go for the full rationale and the Ctrl-C trade-off.
+	//
+	// Restored on every exit path (including the forced-abort one) so the user's
+	// shell is never left as a background group on a terminal it cannot read.
+	term := acquireTerminal(cmd.Process.Pid)
+	defer term.restore()
+
 	if h.afterStart != nil {
 		h.afterStart(cmd)
 	}
 
-	waitErr := supervise(cmd.Wait, sigCh, h.writer())
+	waitErr := supervise(cmd.Wait, sigCh, h.writer(), term.restore)
 	return waitErr
 }
 
@@ -194,7 +217,13 @@ func (h *Handoff) Run(ctx context.Context, op brew.Operation, name string) error
 //     brewfast stops guarding and lets the user force the abort.
 //   - When wait returns first, supervise returns wait's error (nil on success,
 //     the *exec.ExitError carrying a non-zero code otherwise).
-func supervise(wait func() error, sigCh <-chan os.Signal, out io.Writer) error {
+//
+// beforeForce, if non-nil, runs immediately before the forced-abort path
+// terminates the process. forceDefault kills brewfast via a signal, which does
+// NOT unwind the stack or run deferred functions — so terminal ownership must be
+// handed back here explicitly, or the user's shell is left as a background group
+// on a terminal it cannot read from (a wedged shell).
+func supervise(wait func() error, sigCh <-chan os.Signal, out io.Writer, beforeForce func()) error {
 	done := make(chan error, 1)
 	go func() { done <- wait() }()
 
@@ -214,6 +243,9 @@ func supervise(wait func() error, sigCh <-chan os.Signal, out io.Writer) error {
 			// Second interrupt: stop swallowing and allow default termination.
 			// Restore the default disposition and re-deliver the signal to
 			// ourselves so the process dies as it normally would.
+			if beforeForce != nil {
+				beforeForce()
+			}
 			forceDefault(sig)
 			// If forceDefault could not terminate us (non-unix / unusual
 			// signal), fall through and keep waiting on the child rather than

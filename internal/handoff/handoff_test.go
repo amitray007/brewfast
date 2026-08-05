@@ -383,7 +383,7 @@ func TestSupervise_FirstSignalSwallowed(t *testing.T) {
 	wait := func() error { <-release; return nil }
 
 	done := make(chan error, 1)
-	go func() { done <- supervise(wait, sigCh, out) }()
+	go func() { done <- supervise(wait, sigCh, out, nil) }()
 
 	sigCh <- syscall.SIGINT
 
@@ -427,7 +427,7 @@ func TestSupervise_SecondSignalStopsSwallowing(t *testing.T) {
 	wait := func() error { <-release; return nil }
 
 	done := make(chan error, 1)
-	go func() { done <- supervise(wait, sigCh, out) }()
+	go func() { done <- supervise(wait, sigCh, out, nil) }()
 
 	sigCh <- syscall.SIGINT // first: swallowed
 	time.Sleep(50 * time.Millisecond)
