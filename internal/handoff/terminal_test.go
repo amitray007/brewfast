@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -57,26 +58,41 @@ func TestTerminalPromptRegression(t *testing.T) {
 	// read. Writing earlier races the reader's startup: the byte would be
 	// consumed from the line discipline before the read is posted, and the test
 	// would hang for a reason unrelated to what it is meant to prove.
-	out := make(chan string, 1)
+	//
+	// Output is accumulated under a mutex and inspected while the stream is still
+	// open, rather than waiting for the master read to return an error. Whether
+	// closing the slave ends a master read is platform-dependent: on macOS it
+	// surfaces as EOF, on Linux the read simply blocks — and this parent holds
+	// its own slave fd open regardless, so waiting for end-of-stream would hang
+	// forever on Linux.
+	var mu sync.Mutex
+	var sb strings.Builder
+	captured := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return sb.String()
+	}
+
 	ready := make(chan struct{})
 	go func() {
 		buf := make([]byte, 4096)
-		var sb strings.Builder
 		signalled := false
 		for {
 			n, rerr := ptmx.Read(buf)
 			if n > 0 {
+				mu.Lock()
 				sb.Write(buf[:n])
-				if !signalled && strings.Contains(sb.String(), readerReadyMarker) {
+				seen := sb.String()
+				mu.Unlock()
+				if !signalled && strings.Contains(seen, readerReadyMarker) {
 					signalled = true
 					close(ready)
 				}
 			}
 			if rerr != nil {
-				break
+				return
 			}
 		}
-		out <- sb.String()
 	}()
 
 	go func() {
@@ -94,26 +110,25 @@ func TestTerminalPromptRegression(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("child session failed: %v", err)
+			t.Fatalf("child session failed: %v\npty output:\n%s", err, captured())
 		}
 	case <-time.After(15 * time.Second):
 		_ = cmd.Process.Kill()
-		var diag string
-		select {
-		case diag = <-out:
-		case <-time.After(2 * time.Second):
-		}
 		t.Fatalf("timed out: the brew child never consumed the prompt answer "+
-			"(SIGTTIN stop — the interactive-prompt hang has regressed)\npty output:\n%s", diag)
+			"(SIGTTIN stop — the interactive-prompt hang has regressed)\npty output:\n%s", captured())
 	}
 
-	select {
-	case got := <-out:
-		if !strings.Contains(got, "CHILD-READ-OK") {
-			t.Fatalf("child did not report reading the answer; pty output:\n%s", got)
+	// The child has exited, but the last of its output may still be in flight
+	// through the pty, so poll briefly rather than reading once.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if strings.Contains(captured(), "CHILD-READ-OK") {
+			return
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no output captured from pty")
+		if time.Now().After(deadline) {
+			t.Fatalf("child did not report reading the answer; pty output:\n%s", captured())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
