@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.4](https://github.com/amitray007/brewfast/compare/brewfast-v1.0.3...brewfast-v1.0.4) (2026-08-05)
+
+
+### Bug Fixes
+
+* give brew the terminal so interactive prompts can be answered ([965dcfb](https://github.com/amitray007/brewfast/commit/965dcfbb27db95bd47cd4fe8c13fa5ae647c8c99))
+* hand brew the terminal for interactive prompts ([dd936e9](https://github.com/amitray007/brewfast/commit/dd936e9d81c2e034b9137268d01a0d8cc580cce3))
+* **test:** don't wait for pty end-of-stream to capture child output ([6d9f321](https://github.com/amitray007/brewfast/commit/6d9f3211c31d502bdcc5bda818b1f2372d7f207c))
+
 ## [1.0.3](https://github.com/amitray007/brewfast/compare/brewfast-v1.0.2...brewfast-v1.0.3) (2026-08-01)
 
 
