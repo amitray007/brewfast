@@ -18,13 +18,22 @@ import (
 type checkDeps struct {
 	caskInfo   func(string) (*brew.Cask, error)
 	isSlowHost func(string) bool
+	// update refreshes tap metadata so the report describes the CURRENT cask
+	// definition. It refreshes brew's own metadata checkout; it still installs and
+	// downloads nothing, so `check` remains read-only with respect to the user's
+	// installed software (R27).
+	update func() error
+	// stderr receives the soft warning when a metadata refresh fails.
+	stderr io.Writer
 }
 
 // realCheckDeps wires the report to the real brew adapter and host classifier.
-func realCheckDeps() checkDeps {
+func realCheckDeps(stderr io.Writer) checkDeps {
 	return checkDeps{
 		caskInfo:   brew.CaskInfo,
 		isSlowHost: host.IsSlowHost,
+		update:     brew.Update,
+		stderr:     stderr,
 	}
 }
 
@@ -71,7 +80,7 @@ func newCheckCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCheck(cmd.OutOrStdout(), realCheckDeps(), args[0])
+			return runCheck(cmd.OutOrStdout(), realCheckDeps(cmd.ErrOrStderr()), args[0])
 		},
 	}
 }
@@ -81,6 +90,15 @@ func newCheckCmd() *cobra.Command {
 // (accelerable / already-fast / no-checksum) is a success (nil error) since
 // none is a failure — merely information about applicability.
 func runCheck(out io.Writer, d checkDeps, name string) error {
+	// Refresh tap metadata first so the report reflects the current cask, not a
+	// stale local checkout. Non-fatal: on failure warn and report against local
+	// data rather than failing a read-only query.
+	if d.update != nil {
+		if err := d.update(); err != nil && d.stderr != nil {
+			fmt.Fprintf(d.stderr, "brewfast: could not refresh brew metadata (%v); reporting local cask data, which may be out of date.\n", err)
+		}
+	}
+
 	cask, err := d.caskInfo(name)
 	if err != nil {
 		if errors.Is(err, brew.ErrCaskNotFound) {

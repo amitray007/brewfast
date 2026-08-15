@@ -57,14 +57,11 @@ func TestParseCaskInfo_Malformed(t *testing.T) {
 	}
 }
 
-// A `brew search orpheus`-style fixture: a Casks section with a tap-qualified
-// cask line, plus a Formulae section (including its own tap-qualified line) that
-// must be excluded.
-const searchFixture = `==> Formulae
-morph
-amitray007/tap/orpheus-cli
-==> Casks
-morpheus
+// A `brew search --cask orpheus`-style fixture. Because SearchCandidates scopes
+// the search with --cask, every line brew prints is a cask; the parser's job is
+// to reduce tap-qualified references to bare tokens and de-duplicate, NOT to
+// classify formulae vs casks.
+const searchFixture = `morpheus
 orpheus
 orpheus-nightly
 amitray007/tap/orpheus-beta
@@ -72,23 +69,51 @@ amitray007/tap/orpheus-beta
 
 func TestParseSearchOutput(t *testing.T) {
 	got := parseSearchOutput(searchFixture)
-	// Tap-qualified cask lines are reduced to their bare token; the tap-qualified
-	// FORMULA line (orpheus-cli) is dropped entirely.
+	// Tap-qualified cask lines are reduced to their bare token.
 	want := []string{"morpheus", "orpheus", "orpheus-nightly", "orpheus-beta"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseSearchOutput() = %v, want %v", got, want)
 	}
 }
 
-// TestParseSearchOutput_TapFormulaExcluded is the regression for `brewfast
-// brewfast`: searching a name whose only match is a tap-qualified FORMULA
-// (brewfast itself) must yield zero cask candidates — not a slashed name that
-// later fails cask-name validation.
-func TestParseSearchOutput_TapFormulaExcluded(t *testing.T) {
-	fixture := "==> Formulae\namitray007/tap/brewfast\nbeast\n"
+// TestParseSearchOutput_PipedHeaderlessOutput is the regression for the bug
+// where `brewfast t3` offered formulae (qt3d, ropebwt3, mt32emu) as cask
+// candidates.
+//
+// brew prints its "==> Formulae"/"==> Casks" headers ONLY when stdout is a
+// terminal. Read through a pipe — which is always how brewfast reads it — the
+// groups arrive as bare names separated by a blank line, exactly as reproduced
+// below. The old parser started in "casks" and tracked those absent headers, so
+// it labeled every formula a cask.
+//
+// The fix scopes the search itself with --cask so brew never emits formulae at
+// all. This asserts the parser is faithful to that scoped output and, critically,
+// that a blank-line group separator is not treated as a section change.
+func TestParseSearchOutput_PipedHeaderlessOutput(t *testing.T) {
+	// Real `brew search --cask -- t3` stdout captured through a pipe.
+	fixture := "convert3dgui\ndust3d\nfont-3270\nt3-code\ntheblankclub/tap/t3code-alpha\n"
 	got := parseSearchOutput(fixture)
-	if len(got) != 0 {
-		t.Errorf("a tap-qualified formula must not be a cask candidate; got %v", got)
+	want := []string{"convert3dgui", "dust3d", "font-3270", "t3-code", "t3code-alpha"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseSearchOutput(piped --cask output) = %v, want %v", got, want)
+	}
+
+	// A blank line separates groups in brew's piped layout; it must never be
+	// read as a section marker that changes how later names are classified.
+	sep := parseSearchOutput("alpha\n\nbeta\n")
+	if !reflect.DeepEqual(sep, []string{"alpha", "beta"}) {
+		t.Errorf("a blank separator line must not drop or reclassify names; got %v", sep)
+	}
+}
+
+// TestParseSearchOutput_HeadersTolerated ensures output captured from a terminal
+// (which does carry headers) still parses to the same names — the markers are
+// skipped as noise rather than used for classification.
+func TestParseSearchOutput_HeadersTolerated(t *testing.T) {
+	got := parseSearchOutput("==> Casks\norpheus\norpheus-nightly\n")
+	want := []string{"orpheus", "orpheus-nightly"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseSearchOutput(with headers) = %v, want %v", got, want)
 	}
 }
 
@@ -100,19 +125,11 @@ func TestParseSearchOutput_NoMatch(t *testing.T) {
 }
 
 func TestParseSearchOutput_CaskOnlyNoHeader(t *testing.T) {
-	// A cask-only search can print bare names with no header line.
+	// A cask-only search prints bare names with no header line.
 	got := parseSearchOutput("orpheus\norpheus-nightly\n")
 	want := []string{"orpheus", "orpheus-nightly"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseSearchOutput(no header) = %v, want %v", got, want)
-	}
-}
-
-func TestParseSearchOutput_FormulaeOnlyExcluded(t *testing.T) {
-	// Formulae-only output yields no cask candidates.
-	got := parseSearchOutput("==> Formulae\nwget\ncurl\n")
-	if len(got) != 0 {
-		t.Errorf("parseSearchOutput(formulae only) = %v, want zero candidates", got)
 	}
 }
 
