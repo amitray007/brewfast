@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.5](https://github.com/amitray007/brewfast/compare/brewfast-v1.0.4...brewfast-v1.0.5) (2026-08-15)
+
+
+### Bug Fixes
+
+* refresh brew metadata and scope cask search ([e3ee7dd](https://github.com/amitray007/brewfast/commit/e3ee7dd671cb1300b03cd24e6cc3fc19010021fb))
+* refresh brew metadata and scope cask search ([78cc094](https://github.com/amitray007/brewfast/commit/78cc094a4ab741cf3b6f47cfa4a5ebe8b1472e58))
+
 ## [1.0.4](https://github.com/amitray007/brewfast/compare/brewfast-v1.0.3...brewfast-v1.0.4) (2026-08-05)
 
 
