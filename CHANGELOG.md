@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.6](https://github.com/amitray007/brewfast/compare/brewfast-v1.0.5...brewfast-v1.0.6) (2026-08-15)
+
+
+### Bug Fixes
+
+* route exact formula names away from cask resolution ([a04f559](https://github.com/amitray007/brewfast/commit/a04f559d5ec0058c70f658051310529a508347dd))
+* route exact formula names away from cask resolution ([acb1115](https://github.com/amitray007/brewfast/commit/acb11156b5128ba7d7491c7a1910a50da82b6681))
+
 ## [1.0.5](https://github.com/amitray007/brewfast/compare/brewfast-v1.0.4...brewfast-v1.0.5) (2026-08-15)
 
 
