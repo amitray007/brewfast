@@ -166,6 +166,11 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 			return &exitError{code: 1, err: errors.New("no exact cask match; see candidates above")}
 		case errors.Is(err, resolve.ErrNoCandidates):
 			return stopf(1, "no cask matches %q, and no near matches were found", name)
+		case errors.Is(err, resolve.ErrFormulaMatch):
+			if name == "brewfast" {
+				return stopf(1, "%q is a Homebrew formula, not a cask.\nTo update brewfast itself, run:\n    brewfast upgrade", name)
+			}
+			return stopf(1, "%q is a Homebrew formula, not a cask.\nbrewfast currently accelerates casks only. Use Homebrew directly:\n    brew install %s", name, name)
 		default:
 			return stopf(1, "resolving %q: %v", name, err)
 		}

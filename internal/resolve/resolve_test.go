@@ -48,7 +48,10 @@ func baseOpts(
 		Stderr:      &stderr,
 		Selector:    sel,
 		lookupExact: lookup,
-		search:      search,
+		lookupFormula: func(string) (bool, error) {
+			return false, nil
+		},
+		search: search,
 	}, &stderr
 }
 
@@ -57,6 +60,7 @@ func baseOpts(
 func TestExactMatchReturnsImmediately(t *testing.T) {
 	sel := &fakeSelector{}
 	searchCalled := false
+	formulaLookupCalled := false
 	lookup := func(name string) (*brew.Cask, error) {
 		return &brew.Cask{Token: name}, nil
 	}
@@ -65,6 +69,10 @@ func TestExactMatchReturnsImmediately(t *testing.T) {
 		return nil, nil
 	}
 	opts, _ := baseOpts(sel, true /*TTY*/, false, lookup, search)
+	opts.lookupFormula = func(string) (bool, error) {
+		formulaLookupCalled = true
+		return false, nil
+	}
 
 	got, gotCask, err := Resolve("orpheus-nightly", opts)
 	if err != nil {
@@ -81,8 +89,66 @@ func TestExactMatchReturnsImmediately(t *testing.T) {
 	if searchCalled {
 		t.Error("search was called on an exact match; it must not be")
 	}
+	if formulaLookupCalled {
+		t.Error("formula lookup was called on an exact cask match; it must not be")
+	}
 	if sel.called {
 		t.Error("selector was invoked on an exact match; it must not be")
+	}
+}
+
+// TestExactFormulaStopsBeforeCaskSuggestions is the regression for
+// `brewfast brewfast`: an exact formula must be identified before fuzzy cask
+// matches such as brewlet are offered.
+func TestExactFormulaStopsBeforeCaskSuggestions(t *testing.T) {
+	sel := &fakeSelector{}
+	searchCalled := false
+	lookup := func(string) (*brew.Cask, error) {
+		return nil, brew.ErrCaskNotFound
+	}
+	search := func(string) ([]string, error) {
+		searchCalled = true
+		return []string{"brewlet"}, nil
+	}
+	opts, _ := baseOpts(sel, true, false, lookup, search)
+	opts.lookupFormula = func(name string) (bool, error) {
+		return name == "brewfast", nil
+	}
+
+	_, _, err := Resolve("brewfast", opts)
+	if !errors.Is(err, ErrFormulaMatch) {
+		t.Fatalf("got err %v, want ErrFormulaMatch", err)
+	}
+	if searchCalled {
+		t.Error("cask search ran after an exact formula match; it must not")
+	}
+	if sel.called {
+		t.Error("selector was invoked after an exact formula match; it must not be")
+	}
+}
+
+func TestFormulaLookupErrorSurfaced(t *testing.T) {
+	sel := &fakeSelector{}
+	sentinel := errors.New("brew formula lookup failed")
+	searchCalled := false
+	lookup := func(string) (*brew.Cask, error) {
+		return nil, brew.ErrCaskNotFound
+	}
+	search := func(string) ([]string, error) {
+		searchCalled = true
+		return nil, nil
+	}
+	opts, _ := baseOpts(sel, true, false, lookup, search)
+	opts.lookupFormula = func(string) (bool, error) {
+		return false, sentinel
+	}
+
+	_, _, err := Resolve("brewfast", opts)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("got err %v, want it to wrap the formula lookup sentinel", err)
+	}
+	if searchCalled {
+		t.Error("cask search ran after a hard formula lookup error; it must not")
 	}
 }
 

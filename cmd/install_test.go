@@ -114,6 +114,46 @@ func TestHelpMentionsBrewfast(t *testing.T) {
 	}
 }
 
+func TestExactBrewfastFormulaPointsToSelfUpgrade(t *testing.T) {
+	rec := &recorder{}
+	d, _, _ := fakeDeps(rec, sampleCask())
+	d.resolve = func(string, resolve.Options) (string, *brew.Cask, error) {
+		return "", nil, resolve.ErrFormulaMatch
+	}
+
+	err := runInstall(context.Background(), d, postureFlags{}, "brewfast")
+	if err == nil {
+		t.Fatal("expected formula routing to stop the cask install flow")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "formula, not a cask") || !strings.Contains(msg, "brewfast upgrade") {
+		t.Fatalf("self formula message must explain the type and self-update command, got: %q", msg)
+	}
+	if rec.fetchCalled || rec.handoffCalled {
+		t.Fatal("formula routing must not fetch or hand off through the cask pipeline")
+	}
+}
+
+func TestExactOtherFormulaExplainsCaskOnlySupport(t *testing.T) {
+	rec := &recorder{}
+	d, _, _ := fakeDeps(rec, sampleCask())
+	d.resolve = func(string, resolve.Options) (string, *brew.Cask, error) {
+		return "", nil, resolve.ErrFormulaMatch
+	}
+
+	err := runInstall(context.Background(), d, postureFlags{}, "aria2")
+	if err == nil {
+		t.Fatal("expected formula routing to stop the cask install flow")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "formula, not a cask") || !strings.Contains(msg, "accelerates casks only") || !strings.Contains(msg, "brew install aria2") {
+		t.Fatalf("formula message must explain the current boundary and direct command, got: %q", msg)
+	}
+	if rec.fetchCalled || rec.handoffCalled {
+		t.Fatal("formula routing must not fetch or hand off through the cask pipeline")
+	}
+}
+
 // AE2: non-slow host, no flags → non-zero, message names --any-host/--fallback,
 // nothing fetched or handed off.
 func TestNonSlowHost_NoFlags_Stops(t *testing.T) {
