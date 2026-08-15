@@ -43,6 +43,11 @@ var ErrCancelled = errors.New("selection cancelled")
 // search yields nothing to choose from. Test for it with errors.Is.
 var ErrNoCandidates = errors.New("no matching cask found")
 
+// ErrFormulaMatch is returned when the input is not a cask but is an exact
+// Homebrew formula. Callers use it to explain the type mismatch instead of
+// presenting unrelated fuzzy cask candidates.
+var ErrFormulaMatch = errors.New("exact Homebrew formula match found")
+
 // Selector performs the interactive choice over a set of candidate cask names.
 // The default implementation (HuhSelector) uses a huh Select; tests inject a
 // fake to exercise the picker branch without a real terminal. An implementation
@@ -80,6 +85,10 @@ type Options struct {
 	// return with a nil error is treated as "not found".
 	lookupExact func(name string) (*brew.Cask, error)
 
+	// lookupFormula reports whether the name is an exact formula. Defaults to
+	// brew.FormulaExists and runs only after the exact cask lookup misses.
+	lookupFormula func(name string) (bool, error)
+
 	// search gathers near-name candidates. Defaults to brew.SearchCandidates.
 	search func(name string) ([]string, error)
 }
@@ -91,12 +100,13 @@ type Options struct {
 // on a hit it returns name and the fetched *brew.Cask immediately without
 // gathering candidates or invoking the selector (R4) — callers on the common
 // exact-match path can reuse that cask instead of re-running brew info.
-// Otherwise it gathers candidates via search (brew.SearchCandidates), filters
-// them to cask-looking names, and either shows the picker (TTY and not NoInput)
-// or prints the candidates and returns ErrNoInteractiveResolve. On the picker
-// path the returned cask is nil (the chosen cask's definition was not fetched
-// here). Zero candidates yields ErrNoCandidates. A user abort in the picker
-// yields ErrCancelled.
+// After a cask miss it checks for an exact formula and returns ErrFormulaMatch
+// before any fuzzy search. Otherwise it gathers candidates via search
+// (brew.SearchCandidates), filters them to cask-looking names, and either shows
+// the picker (TTY and not NoInput) or prints the candidates and returns
+// ErrNoInteractiveResolve. On the picker path the returned cask is nil (the
+// chosen cask's definition was not fetched here). Zero candidates yields
+// ErrNoCandidates. A user abort in the picker yields ErrCancelled.
 func Resolve(name string, opts Options) (string, *brew.Cask, error) {
 	opts = opts.withDefaults()
 
@@ -107,6 +117,16 @@ func Resolve(name string, opts Options) (string, *brew.Cask, error) {
 	}
 	if err == nil && cask != nil {
 		return name, cask, nil
+	}
+
+	// An exact formula is a type mismatch, not a misspelling. Stop before fuzzy
+	// cask search so `brewfast brewfast` cannot suggest an unrelated cask.
+	formulaExists, err := opts.lookupFormula(name)
+	if err != nil {
+		return "", nil, fmt.Errorf("looking up formula %q: %w", name, err)
+	}
+	if formulaExists {
+		return "", nil, fmt.Errorf("%w: %q", ErrFormulaMatch, name)
 	}
 
 	// No exact match — gather near-name candidates.
@@ -154,6 +174,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.lookupExact == nil {
 		o.lookupExact = brew.CaskInfo
+	}
+	if o.lookupFormula == nil {
+		o.lookupFormula = brew.FormulaExists
 	}
 	if o.search == nil {
 		o.search = brew.SearchCandidates

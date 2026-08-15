@@ -76,22 +76,26 @@ func ValidateName(name string) error {
 	return nil
 }
 
-// caskInfoV2 mirrors the relevant slice of the `brew info --json=v2` document:
-// a top-level object with a "casks" array.
-type caskInfoV2 struct {
+// brewInfoV2 mirrors the fields brewfast reads from Homebrew's shared
+// `brew info --json=v2` response envelope. Cask metadata drives acceleration;
+// formula metadata is intentionally limited to exact-match detection.
+type brewInfoV2 struct {
 	Casks []struct {
 		Token   string `json:"token"`
 		Version string `json:"version"`
 		URL     string `json:"url"`
 		SHA256  string `json:"sha256"`
 	} `json:"casks"`
+	Formulae []struct {
+		Name string `json:"name"`
+	} `json:"formulae"`
 }
 
 // parseCaskInfo is the pure JSON-parsing core of CaskInfo, split out so it is
 // unit-testable without a real `brew` on the machine. It returns ErrCaskNotFound
 // when the document contains no casks.
 func parseCaskInfo(data []byte) (*Cask, error) {
-	var doc caskInfoV2
+	var doc brewInfoV2
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("parsing brew info json: %w", err)
 	}
@@ -105,6 +109,18 @@ func parseCaskInfo(data []byte) (*Cask, error) {
 		URL:     c.URL,
 		SHA256:  c.SHA256,
 	}, nil
+}
+
+// parseFormulaExists reports whether brew's structured response contains an
+// exact formula. It stays separate from parseCaskInfo because formula and cask
+// metadata have different installation semantics and must not share a model by
+// accident.
+func parseFormulaExists(data []byte) (bool, error) {
+	var doc brewInfoV2
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return false, fmt.Errorf("parsing brew formula info json: %w", err)
+	}
+	return len(doc.Formulae) > 0, nil
 }
 
 // parseSearchOutput is the pure parser for `brew search --cask` stdout, split
@@ -245,6 +261,37 @@ func CaskInfo(name string) (*Cask, error) {
 		return nil, fmt.Errorf("%w: %q (brew info failed: %v)", ErrCaskNotFound, name, err)
 	}
 	return parseCaskInfo(out)
+}
+
+// FormulaExists reports whether name is an exact Homebrew formula. It exists
+// solely so cask resolution can identify the user's input correctly before
+// offering fuzzy cask candidates; it does not opt formulae into acceleration.
+func FormulaExists(name string) (bool, error) {
+	if err := ValidateName(name); err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), brewCmdTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "brew", "info", "--json=v2", "--formula", "--", name)
+	out, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return false, fmt.Errorf("brew formula info for %q timed out after %s", name, brewCmdTimeout)
+		}
+		// An unknown formula exits non-zero and emits no JSON. If brew did emit a
+		// structured response, honor it. Otherwise only an actual process exit is
+		// a clean miss; a failure to start brew must stop resolution rather than
+		// silently falling through to fuzzy cask suggestions.
+		if len(out) > 0 {
+			return parseFormulaExists(out)
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return false, nil
+		}
+		return false, fmt.Errorf("running brew formula info for %q: %w", name, err)
+	}
+	return parseFormulaExists(out)
 }
 
 // CachePath runs `brew --cache --cask -- <name>` and returns the absolute,

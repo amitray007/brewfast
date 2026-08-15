@@ -3,7 +3,10 @@ package brew
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -27,6 +30,18 @@ const caskInfoFixture = `{
 }`
 
 const caskInfoNotFoundFixture = `{"formulae": [], "casks": []}`
+
+const formulaInfoFixture = `{
+  "formulae": [
+    {
+      "name": "brewfast",
+      "full_name": "amitray007/tap/brewfast"
+    }
+  ],
+  "casks": []
+}`
+
+const formulaInfoNotFoundFixture = `{"formulae": [], "casks": []}`
 
 func TestParseCaskInfo(t *testing.T) {
 	c, err := parseCaskInfo([]byte(caskInfoFixture))
@@ -54,6 +69,69 @@ func TestParseCaskInfo_NotFound(t *testing.T) {
 func TestParseCaskInfo_Malformed(t *testing.T) {
 	if _, err := parseCaskInfo([]byte("{not json")); err == nil {
 		t.Error("parseCaskInfo(malformed) = nil error, want a parse error")
+	}
+}
+
+func TestParseFormulaExists(t *testing.T) {
+	exists, err := parseFormulaExists([]byte(formulaInfoFixture))
+	if err != nil {
+		t.Fatalf("parseFormulaExists returned error: %v", err)
+	}
+	if !exists {
+		t.Fatal("parseFormulaExists(existing formula) = false, want true")
+	}
+}
+
+func TestParseFormulaExists_NotFound(t *testing.T) {
+	exists, err := parseFormulaExists([]byte(formulaInfoNotFoundFixture))
+	if err != nil {
+		t.Fatalf("parseFormulaExists returned error: %v", err)
+	}
+	if exists {
+		t.Fatal("parseFormulaExists(empty formulae) = true, want false")
+	}
+}
+
+func TestParseFormulaExists_Malformed(t *testing.T) {
+	if _, err := parseFormulaExists([]byte("{not json")); err == nil {
+		t.Error("parseFormulaExists(malformed) = nil error, want a parse error")
+	}
+}
+
+func installFakeBrew(t *testing.T, scriptBody string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "brew")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+scriptBody+"\n"), 0o755); err != nil {
+		t.Fatalf("write fake brew: %v", err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+func TestFormulaExists_UnknownFormulaExitIsMiss(t *testing.T) {
+	installFakeBrew(t, "exit 1")
+
+	exists, err := FormulaExists("not-a-formula")
+	if err != nil {
+		t.Fatalf("unknown formula should be a clean miss, got: %v", err)
+	}
+	if exists {
+		t.Fatal("unknown formula exit reported an exact formula match")
+	}
+}
+
+func TestFormulaExists_BrewStartFailureIsError(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	exists, err := FormulaExists("brewfast")
+	if err == nil {
+		t.Fatal("a brew start failure must not be reported as a formula miss")
+	}
+	if exists {
+		t.Fatal("a brew start failure reported an exact formula match")
+	}
+	if !strings.Contains(err.Error(), "running brew formula info") {
+		t.Fatalf("start failure needs formula lookup context, got: %v", err)
 	}
 }
 
