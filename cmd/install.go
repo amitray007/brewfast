@@ -26,6 +26,7 @@ type deps struct {
 	cachePath        func(string) (string, error)
 	isInstalled      func(string) bool
 	installedVersion func(string) (string, bool, error)
+	update           func() error
 	installAria2     func() error
 	isSlowHost       func(string) bool
 	resolve          func(string, resolve.Options) (string, *brew.Cask, error)
@@ -82,6 +83,7 @@ func realDeps(cmd *cobra.Command) deps {
 		cachePath:        brew.CachePath,
 		isInstalled:      brew.IsInstalled,
 		installedVersion: brew.InstalledVersion,
+		update:           brew.Update,
 		installAria2: func() error {
 			c := exec.Command("brew", "install", "aria2")
 			c.Stdout = os.Stderr
@@ -133,6 +135,21 @@ func runInstall(ctx context.Context, d deps, flags postureFlags, name string) er
 	// below. It does NOT rescue a genuine checksum MISMATCH — that stays fatal.
 	anyHost := flags.anyHost || flags.force
 	noVerify := flags.noVerify || flags.force
+
+	// 0. Refresh tap metadata FIRST, so every version decision below reads the
+	// current cask definition rather than a stale local checkout. brewfast decides
+	// whether an install is needed before handing off (and pins
+	// HOMEBREW_NO_AUTO_UPDATE=1 on the child), so without this a machine whose tap
+	// is behind reports "already up to date" against a superseded version.
+	//
+	// Deliberately non-fatal: on failure we warn and continue against local
+	// metadata, degrading to the previous behavior rather than blocking an install
+	// over a transient network problem.
+	if d.update != nil {
+		if err := d.update(); err != nil {
+			fmt.Fprintf(d.stderr, "brewfast: could not refresh brew metadata (%v); continuing with local cask data, which may be out of date.\n", err)
+		}
+	}
 
 	// 1. Resolve the (possibly inexact) name. On the exact-match path resolve
 	// already fetched the cask definition and hands it back, so we skip a

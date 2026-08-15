@@ -107,26 +107,26 @@ func parseCaskInfo(data []byte) (*Cask, error) {
 	}, nil
 }
 
-// parseSearchOutput is the pure parser for `brew search` stdout, split out for
-// testing. brew search prints section markers (e.g. "==> Casks") and, for
-// tap-qualified results, "owner/tap/<name>" lines. It also prints "No formulae
-// or casks found" to STDERR while exiting 0, so an empty parsed set here means
-// "no candidates" regardless of the process exit code.
+// parseSearchOutput is the pure parser for `brew search --cask` stdout, split
+// out for testing. Because the search is scoped to casks at the brew level,
+// EVERY name in stdout is a cask and no section routing is needed here. brew
+// also prints "No formulae or casks found" to STDERR while exiting 0, so an
+// empty parsed set here means "no candidates" regardless of the process exit
+// code.
 //
-// Candidate selection is deliberately inclusive (U5 refines): names under a
-// "==> Casks" section and every tap-qualified "owner/tap/name" line are
-// returned; a "==> Formulae" section is skipped. Lines before any section
-// marker are treated as casks too, since a cask-only search prints bare names
-// with no header.
+// Section markers must NOT be used to classify names. brew only prints "==>
+// Formulae"/"==> Casks" headers when stdout is a TERMINAL; when brewfast reads
+// the output through a pipe (always, since it uses cmd.Output), brew emits bare
+// names with the two groups separated only by a blank line. A parser that
+// tracked sections therefore mistook every formula for a cask on the real,
+// piped path — the fix is to scope the search itself with --cask (see
+// SearchCandidates) rather than to guess from layout that is not there.
+//
+// Headers are still tolerated and skipped, so output captured from a terminal
+// parses identically. Tap-qualified "owner/tap/name" lines are reduced to their
+// bare token so they pass cask-name validation and refer to the cask correctly
+// downstream.
 func parseSearchOutput(stdout string) []string {
-	const (
-		sectionNone = iota
-		sectionCasks
-		sectionFormulae
-	)
-	// Start in "casks" so bare cask names printed with no header are captured.
-	section := sectionCasks
-
 	var candidates []string
 	seen := make(map[string]bool)
 	add := func(name string) {
@@ -140,35 +140,14 @@ func parseSearchOutput(stdout string) []string {
 	sc := bufio.NewScanner(strings.NewReader(stdout))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
-		if line == "" {
+		if line == "" || strings.HasPrefix(line, "==>") {
 			continue
 		}
-		if strings.HasPrefix(line, "==>") {
-			header := strings.ToLower(line)
-			switch {
-			case strings.Contains(header, "cask"):
-				section = sectionCasks
-			case strings.Contains(header, "formula"):
-				section = sectionFormulae
-			default:
-				section = sectionNone
-			}
-			continue
-		}
-		// A tap-qualified "owner/tap/name" line is a candidate ONLY when it
-		// appears under the Casks section — the same line can appear under
-		// Formulae (e.g. a tap's own CLI formula), and those are not casks.
-		// Reduce it to the bare token so it passes cask-name validation and
-		// refers to the cask correctly downstream.
 		if strings.Count(line, "/") >= 2 {
-			if section == sectionCasks {
-				add(tapToken(line))
-			}
+			add(tapToken(line))
 			continue
 		}
-		if section == sectionCasks {
-			add(line)
-		}
+		add(line)
 	}
 	return candidates
 }
@@ -292,18 +271,25 @@ func CachePath(name string) (string, error) {
 	return path, nil
 }
 
-// SearchCandidates runs `brew search -- <name>` and returns cask candidates
-// parsed from stdout. Because `brew search` exits 0 even on no match (printing
-// its "No formulae or casks found" notice to stderr), an empty parsed set is
-// treated as zero candidates rather than an error; a genuine exec failure is
-// still surfaced. The name is validated before any exec.
+// SearchCandidates runs `brew search --cask -- <name>` and returns cask
+// candidates parsed from stdout. Because `brew search` exits 0 even on no match
+// (printing its "No formulae or casks found" notice to stderr), an empty parsed
+// set is treated as zero candidates rather than an error; a genuine exec failure
+// is still surfaced. The name is validated before any exec.
+//
+// The --cask scope is load-bearing, not cosmetic: brew omits its "==>
+// Formulae"/"==> Casks" headers whenever stdout is not a terminal, which is
+// always the case here. Without --cask, an unscoped search returns formulae and
+// casks as one undifferentiated list and every formula would be offered as a
+// cask candidate (e.g. `brewfast t3` suggesting qt3d and ropebwt3). Letting brew
+// do the filtering keeps the answer correct regardless of how it formats output.
 func SearchCandidates(name string) ([]string, error) {
 	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), brewCmdTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "brew", "search", "--", name)
+	cmd := exec.CommandContext(ctx, "brew", "search", "--cask", "--", name)
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -318,6 +304,44 @@ func SearchCandidates(name string) ([]string, error) {
 		return nil, fmt.Errorf("searching for %q: %w", name, err)
 	}
 	return parseSearchOutput(string(out)), nil
+}
+
+// updateTimeout bounds `brew update`. A tap refresh does real network I/O across
+// every tapped repository, so it needs more headroom than the read-only info and
+// search calls, but it must still fail fast rather than stall an install behind a
+// wedged remote.
+const updateTimeout = 90 * time.Second
+
+// Update runs `brew update --quiet` to refresh tap metadata, so a subsequent
+// CaskInfo reads the CURRENT cask definition rather than whatever version was
+// last fetched onto this machine.
+//
+// This matters because brewfast reads a cask's version, url, and sha256 straight
+// from the local tap checkout. Homebrew normally hides tap staleness by
+// auto-updating inside `brew install`, but brewfast decides whether an install is
+// even needed BEFORE it hands off — and then pins HOMEBREW_NO_AUTO_UPDATE=1 for
+// the child. Without an explicit refresh, a machine whose tap is behind reports
+// the stale version as the latest and brewfast reports "already up to date" for a
+// cask that has a newer release upstream.
+//
+// A refresh failure is returned to the caller but is NOT fatal by design: callers
+// treat it as a soft warning and continue against the local metadata, so a
+// network blip degrades brewfast to its previous behavior instead of blocking an
+// install that would otherwise work.
+func Update() error {
+	ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "brew", "update", "--quiet")
+	// brew refuses to auto-update inside its own update; keep the child quiet and
+	// non-interactive so it can never block on a prompt.
+	cmd.Env = append(cmd.Environ(), "HOMEBREW_NO_AUTO_UPDATE=1", "HOMEBREW_NO_INTERACTIVE=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("brew update timed out after %s", updateTimeout)
+		}
+		return fmt.Errorf("brew update failed: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // IsInstalled reports whether tool (e.g. "brew", "aria2") is resolvable on PATH.

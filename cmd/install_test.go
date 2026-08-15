@@ -23,14 +23,29 @@ type recorder struct {
 	installAria2Calls int
 	fetchParams       accel.Params
 	handoffOp         brew.Operation
+	updateCalls       int
+	// updatedBeforeCaskRead records whether the metadata refresh happened before
+	// the cask definition was read — the ordering that makes the refresh useful.
+	updatedBeforeCaskRead bool
+	caskRead              bool
 }
 
 func fakeDeps(rec *recorder, cask *brew.Cask) (deps, *bytes.Buffer, *bytes.Buffer) {
 	var out, errBuf bytes.Buffer
 	d := deps{
-		caskInfo:    func(string) (*brew.Cask, error) { return cask, nil },
+		caskInfo: func(string) (*brew.Cask, error) {
+			rec.caskRead = true
+			return cask, nil
+		},
 		cachePath:   func(string) (string, error) { return "/tmp/cache/abc--" + cask.Token + ".dmg", nil },
 		isInstalled: func(string) bool { return true }, // aria2 present
+		update: func() error {
+			rec.updateCalls++
+			if !rec.caskRead {
+				rec.updatedBeforeCaskRead = true
+			}
+			return nil
+		},
 		// Default: the cask is NOT installed, so the happy-path tests below still
 		// accelerate + reinstall-from-cache (the up-to-date short-circuit only
 		// triggers when a test overrides this to report the current version).
@@ -41,6 +56,9 @@ func fakeDeps(rec *recorder, cask *brew.Cask) (deps, *bytes.Buffer, *bytes.Buffe
 		},
 		isSlowHost: func(string) bool { return true },
 		resolve: func(name string, _ resolve.Options) (string, *brew.Cask, error) {
+			// The exact-match path supplies the cask definition, so this is also a
+			// read of cask metadata for refresh-ordering purposes.
+			rec.caskRead = true
 			return name, cask, nil
 		},
 		fetch: func(p accel.Params) error {
@@ -341,6 +359,54 @@ func TestAlreadyCurrent_NoOp(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), cask.Version) {
 		t.Fatalf("up-to-date message must name the version, got: %q", out.String())
+	}
+}
+
+// KEY REGRESSION: brewfast must refresh tap metadata BEFORE it reads a cask's
+// version, otherwise a machine whose tap is behind reports the stale local
+// version as the latest.
+//
+// This is the fix for `brewfast t3code-alpha` printing "already up to date
+// (0.0.34-alpha.20260815.2)" while the tap upstream had ...20260815.4. brewfast
+// decides whether an install is needed before handing off — and pins
+// HOMEBREW_NO_AUTO_UPDATE=1 on the child — so brew's own auto-update never gets a
+// chance to correct stale metadata. The refresh must therefore be explicit, and
+// must precede the metadata read to be of any use.
+func TestRefreshesMetadataBeforeReadingCask(t *testing.T) {
+	rec := &recorder{}
+	cask := sampleCask()
+	d, _, _ := fakeDeps(rec, cask)
+	d.installedVersion = func(string) (string, bool, error) { return cask.Version, true, nil }
+
+	if err := runInstall(context.Background(), d, postureFlags{}, "orpheus-nightly"); err != nil {
+		t.Fatalf("runInstall: %v", err)
+	}
+	if rec.updateCalls != 1 {
+		t.Fatalf("expected exactly one metadata refresh, got %d", rec.updateCalls)
+	}
+	if !rec.updatedBeforeCaskRead {
+		t.Fatal("metadata refresh must happen BEFORE the cask version is read, " +
+			"or the up-to-date decision is made against stale data")
+	}
+}
+
+// A metadata refresh failure must be a soft warning, never fatal: brewfast falls
+// back to local cask data so a network blip cannot block an install that would
+// otherwise succeed.
+func TestRefreshFailureIsNonFatal(t *testing.T) {
+	rec := &recorder{}
+	cask := sampleCask()
+	d, _, errBuf := fakeDeps(rec, cask)
+	d.update = func() error { return errors.New("network unreachable") }
+
+	if err := runInstall(context.Background(), d, postureFlags{}, "orpheus-nightly"); err != nil {
+		t.Fatalf("a failed metadata refresh must not fail the install, got: %v", err)
+	}
+	if !rec.fetchCalled || !rec.handoffCalled {
+		t.Fatal("the install must proceed against local data after a refresh failure")
+	}
+	if !strings.Contains(errBuf.String(), "out of date") {
+		t.Fatalf("expected a staleness warning on stderr, got: %q", errBuf.String())
 	}
 }
 
